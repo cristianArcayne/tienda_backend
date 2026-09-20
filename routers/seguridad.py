@@ -1,3 +1,5 @@
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 import hashlib
@@ -5,6 +7,7 @@ import uuid
 
 from database import get_db
 from models.seguridad_persona import Usuario, Persona, Cliente, Rol
+from models.catalogo import Ropa, Favorito
 from routers.bitacora import registrar_bitacora
 from schemas.seguridad import (
     ClienteRegistroRequest,
@@ -438,6 +441,10 @@ def cambiar_contrasena(req: CambiarContrasenaRequest, db: Session = Depends(get_
 
 
 
+# =========================================================================
+# ENDPOINTS FAVORITOS (LISTAR, AGREGAR Y ELIMINAR)
+# =========================================================================
+
 @router.get("/api/favoritos")
 @router.get("/api/favoritos/")
 @router.get("/api/v1/favoritos")
@@ -445,14 +452,99 @@ def cambiar_contrasena(req: CambiarContrasenaRequest, db: Session = Depends(get_
 def listar_favoritos(
     page: int = 1,
     page_size: int = 100,
+    categoria: Optional[int] = None,
+    marca: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
+    try:
+        query = db.query(Favorito).join(Ropa, Favorito.ropa_id == Ropa.id)
+        if categoria:
+            query = query.filter(Ropa.categoria_id == categoria)
+        
+        total = query.count()
+        favoritos_db = query.order_by(Favorito.creado_en.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        
+        results = []
+        for fav in favoritos_db:
+            r = fav.ropa
+            if r:
+                results.append({
+                    "id": fav.id,
+                    "usuario": fav.usuario_id or 1,
+                    "producto_id": r.id,
+                    "producto_nombre": r.nombre,
+                    "producto_precio": float(r.precio),
+                    "producto_imagen": r.imagen_uri,
+                    "creado_en": fav.creado_en.isoformat() if fav.creado_en else datetime.utcnow().isoformat()
+                })
+        return {
+            "count": total,
+            "next": None,
+            "previous": None,
+            "results": results
+        }
+    except Exception as e:
+        print("Error al listar favoritos:", e)
+        return {"count": 0, "next": None, "previous": None, "results": []}
+
+
+@router.post("/api/favoritos", status_code=status.HTTP_201_CREATED)
+@router.post("/api/favoritos/", status_code=status.HTTP_201_CREATED)
+@router.post("/api/v1/favoritos", status_code=status.HTTP_201_CREATED)
+@router.post("/api/v1/favoritos/", status_code=status.HTTP_201_CREATED)
+def agregar_favorito(req: dict, db: Session = Depends(get_db)):
+    producto_id = req.get("producto_id") or req.get("ropa_id") or req.get("id")
+    if not producto_id:
+        raise HTTPException(status_code=400, detail="producto_id es requerido")
+    
+    ropa = db.query(Ropa).filter(Ropa.id == int(producto_id)).first()
+    if not ropa:
+        raise HTTPException(status_code=404, detail="Prenda no encontrada")
+    
+    # Verificar si ya está en favoritos
+    existente = db.query(Favorito).filter(Favorito.ropa_id == ropa.id).first()
+    if existente:
+        return {
+            "id": existente.id,
+            "usuario": existente.usuario_id or 1,
+            "producto_id": ropa.id,
+            "producto_nombre": ropa.nombre,
+            "producto_precio": float(ropa.precio),
+            "producto_imagen": ropa.imagen_uri,
+            "creado_en": existente.creado_en.isoformat() if existente.creado_en else datetime.utcnow().isoformat()
+        }
+    
+    nuevo_fav = Favorito(ropa_id=ropa.id, usuario_id=1, creado_en=datetime.utcnow())
+    db.add(nuevo_fav)
+    db.commit()
+    db.refresh(nuevo_fav)
+    
     return {
-        "count": 0,
-        "next": None,
-        "previous": None,
-        "results": []
+        "id": nuevo_fav.id,
+        "usuario": nuevo_fav.usuario_id or 1,
+        "producto_id": ropa.id,
+        "producto_nombre": ropa.nombre,
+        "producto_precio": float(ropa.precio),
+        "producto_imagen": ropa.imagen_uri,
+        "creado_en": nuevo_fav.creado_en.isoformat()
     }
+
+
+@router.delete("/api/favoritos/{fav_id}")
+@router.delete("/api/favoritos/{fav_id}/")
+@router.delete("/api/v1/favoritos/{fav_id}")
+@router.delete("/api/v1/favoritos/{fav_id}/")
+def eliminar_favorito(fav_id: int, db: Session = Depends(get_db)):
+    fav = db.query(Favorito).filter(Favorito.id == fav_id).first()
+    if not fav:
+        # Intentar también por ropa_id para máxima compatibilidad
+        fav = db.query(Favorito).filter(Favorito.ropa_id == fav_id).first()
+    
+    if fav:
+        db.delete(fav)
+        db.commit()
+    
+    return {"success": True, "message": "Prenda eliminada de favoritos"}
 
 
 @router.get("/api/seguridad/perfil")

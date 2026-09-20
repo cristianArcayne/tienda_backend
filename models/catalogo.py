@@ -209,3 +209,19 @@ class Resena(Base):
     # Relaciones
     cliente = relationship("Cliente", back_populates="resenas")
     ropa = relationship("Ropa", back_populates="resenas")
+
+
+class Favorito(Base):
+    """
+    Entidad FAVORITO (Prendas marcadas como favoritas por el usuario)
+    """
+    __tablename__ = "favoritos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    usuario_id = Column(Integer, nullable=True, default=1)
+    ropa_id = Column(Integer, ForeignKey("ropa.id", ondelete="CASCADE"), nullable=False)
+    creado_en = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relaciones
+    ropa = relationship("Ropa")
+
