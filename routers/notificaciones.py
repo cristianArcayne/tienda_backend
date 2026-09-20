@@ -1,19 +1,19 @@
 """
-Router para Gestión de Notificaciones Push Web y Campañas Promocionales.
+Router para Gestión de Notificaciones Push Web, Móviles y Feed en Tiempo Real.
 """
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models.notificacion import SuscripcionPushModel
+from models.notificacion import SuscripcionPushModel, NotificacionModel
 
 
 router = APIRouter(
     prefix="/api/v1/notificaciones",
-    tags=["Notificaciones Push"]
+    tags=["Notificaciones Push & Feed"]
 )
 
 compat_router = APIRouter(
@@ -38,6 +38,56 @@ class SuscripcionPushCreate(BaseModel):
 class PruebaPushPayload(BaseModel):
     titulo: str
     mensaje: str
+    tipo: Optional[str] = "BROADCAST"
+
+
+class NotificacionCreatePayload(BaseModel):
+    titulo: str
+    mensaje: str
+    tipo: Optional[str] = "PROMOCION"
+    usuario_id: Optional[int] = None
+    datos_adicionales: Optional[str] = None
+
+
+class NotificacionResponse(BaseModel):
+    id: int
+    titulo: str
+    mensaje: str
+    tipo: str
+    leida: bool
+    fecha_creacion: datetime
+    datos_adicionales: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+def crear_notificacion_sistema(
+    db: Session,
+    titulo: str,
+    mensaje: str,
+    tipo: str = "PROMOCION",
+    usuario_id: Optional[int] = None,
+    datos_adicionales: Optional[str] = None
+) -> NotificacionModel:
+    """Función utilitaria interna para registrar notificaciones desde cualquier módulo."""
+    try:
+        nueva = NotificacionModel(
+            titulo=titulo,
+            mensaje=mensaje,
+            tipo=tipo,
+            usuario_id=usuario_id,
+            datos_adicionales=datos_adicionales,
+            fecha_creacion=datetime.utcnow(),
+            leida=False
+        )
+        db.add(nueva)
+        db.commit()
+        db.refresh(nueva)
+        return nueva
+    except Exception as e:
+        db.rollback()
+        print(f"[Notificaciones] Error al crear notificación: {e}")
+        return None
 
 
 def _formatear_suscripcion(s: SuscripcionPushModel) -> Dict[str, Any]:
@@ -55,9 +105,41 @@ def _formatear_suscripcion(s: SuscripcionPushModel) -> Dict[str, Any]:
     }
 
 
+def _formatear_notificacion(n: NotificacionModel) -> Dict[str, Any]:
+    return {
+        "id": n.id,
+        "titulo": n.titulo,
+        "mensaje": n.mensaje,
+        "tipo": n.tipo,
+        "leida": bool(n.leida),
+        "fecha_creacion": n.fecha_creacion.isoformat() if n.fecha_creacion else datetime.utcnow().isoformat(),
+        "created_at": n.fecha_creacion.isoformat() if n.fecha_creacion else datetime.utcnow().isoformat(),
+        "datos_adicionales": n.datos_adicionales
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Endpoints de Notificaciones Push
+# Endpoints de Notificaciones
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _listar_feed_impl(
+    tipo: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Retorna el listado de notificaciones para la app móvil y frontend."""
+    query = db.query(NotificacionModel).order_by(NotificacionModel.id.desc())
+    if tipo:
+        query = query.filter(NotificacionModel.tipo.ilike(f"%{tipo}%"))
+    
+    notificaciones = query.limit(limit).all()
+    results = [_formatear_notificacion(n) for n in notificaciones]
+    return {
+        "count": len(results),
+        "results": results,
+        "notificaciones": results
+    }
+
 
 def _listar_suscripciones_impl(
     page: int = Query(1, ge=1),
@@ -130,21 +212,50 @@ def _probar_impl(
     payload: PruebaPushPayload,
     db: Session = Depends(get_db)
 ):
-    # Registrar simulación de envío a todas las suscripciones activas
+    # Guardar en base de datos para que la app móvil y web lo lean
+    notif = crear_notificacion_sistema(
+        db=db,
+        titulo=payload.titulo or "Aviso de FashionStore",
+        mensaje=payload.mensaje,
+        tipo=payload.tipo or "BROADCAST"
+    )
+
+    # Actualizar suscripciones web
     activas = db.query(SuscripcionPushModel).filter(SuscripcionPushModel.activa == True).all()
     ahora = datetime.utcnow()
     for s in activas:
         s.ultimo_envio = ahora
     db.commit()
+
     return {
         "success": True,
-        "message": f"Notificación '{payload.titulo}' enviada a {len(activas)} dispositivo(s) activo(s)."
+        "notificacion": _formatear_notificacion(notif) if notif else None,
+        "message": f"Notificación '{payload.titulo}' enviada a {len(activas)} dispositivo(s) y registrada en el centro de notificaciones."
     }
+
+
+def _enviar_notificacion_impl(
+    payload: NotificacionCreatePayload,
+    db: Session = Depends(get_db)
+):
+    notif = crear_notificacion_sistema(
+        db=db,
+        titulo=payload.titulo,
+        mensaje=payload.mensaje,
+        tipo=payload.tipo or "PROMOCION",
+        usuario_id=payload.usuario_id,
+        datos_adicionales=payload.datos_adicionales
+    )
+    return _formatear_notificacion(notif) if notif else {"message": "Notificación creada"}
 
 
 for r in [router, compat_router]:
     r.add_api_route("/", _listar_suscripciones_impl, methods=["GET"])
     r.add_api_route("", _listar_suscripciones_impl, methods=["GET"], include_in_schema=False)
+    r.add_api_route("/feed", _listar_feed_impl, methods=["GET"])
+    r.add_api_route("/feed/", _listar_feed_impl, methods=["GET"], include_in_schema=False)
+    r.add_api_route("/lista", _listar_feed_impl, methods=["GET"])
+    r.add_api_route("/lista/", _listar_feed_impl, methods=["GET"], include_in_schema=False)
     r.add_api_route("/vapid-public-key", _vapid_public_key_impl, methods=["GET"])
     r.add_api_route("/vapid-public-key/", _vapid_public_key_impl, methods=["GET"], include_in_schema=False)
     r.add_api_route("/suscribirse", _suscribirse_impl, methods=["POST"])
@@ -153,3 +264,5 @@ for r in [router, compat_router]:
     r.add_api_route("/desuscribirse/", _desuscribirse_impl, methods=["POST"], include_in_schema=False)
     r.add_api_route("/probar", _probar_impl, methods=["POST"])
     r.add_api_route("/probar/", _probar_impl, methods=["POST"], include_in_schema=False)
+    r.add_api_route("/enviar", _enviar_notificacion_impl, methods=["POST"])
+    r.add_api_route("/enviar/", _enviar_notificacion_impl, methods=["POST"], include_in_schema=False)

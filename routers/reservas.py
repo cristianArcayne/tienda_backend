@@ -180,9 +180,18 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
             cantidad=item.cantidad,
             precio_unitario=precio_un
         )
-        db.add(det)
-
     db.commit()
+
+    try:
+        from routers.notificaciones import crear_notificacion_sistema
+        crear_notificacion_sistema(
+            db=db,
+            titulo=f"📦 Reserva Creada #{nueva_reserva.id}",
+            mensaje=f"Tu reserva en {sucursal.nombre} ha sido confirmada. Tienes 48 horas para retirarla.",
+            tipo="RESERVA"
+        )
+    except Exception as e:
+        print(f"[Reservas] Error al registrar notificación de reserva: {e}")
 
     reserva_cargada = db.query(Reserva).options(
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),

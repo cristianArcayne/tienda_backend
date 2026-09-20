@@ -308,6 +308,19 @@ def _ejecutar_venta_pos_core(
 
     db.commit()
 
+    # Emitir notificación para móviles y web
+    try:
+        from routers.notificaciones import crear_notificacion_sistema
+        tipo_nombre = "E-commerce" if tipo_venta_id == 2 else "POS Tienda"
+        crear_notificacion_sistema(
+            db=db,
+            titulo=f"🛍️ Compra Confirmada #{nueva_venta.id}",
+            mensaje=f"Tu compra ({tipo_nombre}) por Bs. {nueva_venta.total_final:.2f} ha sido procesada con éxito.",
+            tipo="COMPRA"
+        )
+    except Exception as e:
+        print(f"[Ventas] Error al registrar notificación de venta: {e}")
+
     venta_cargada = db.query(Venta).options(
         joinedload(Venta.sucursal),
         joinedload(Venta.empleado),

@@ -68,6 +68,21 @@ VISTAS_CONFIG = [
         ]
     },
     {
+        "nombre": "detalle_venta",
+        "etiqueta": "Prendas Vendidas y Ranking",
+        "campos": [
+            {"nombre": "id", "etiqueta": "ID Detalle", "tipo": "number", "operadores": ["exact"], "agregable": True, "agrupable": True},
+            {"nombre": "prenda_nombre", "etiqueta": "Prenda", "tipo": "string", "operadores": ["exact", "contains"], "agregable": False, "agrupable": True},
+            {"nombre": "categoria_nombre", "etiqueta": "Categoría", "tipo": "string", "operadores": ["exact", "contains"], "agregable": False, "agrupable": True},
+            {"nombre": "talla", "etiqueta": "Talla", "tipo": "string", "operadores": ["exact"], "agregable": False, "agrupable": True},
+            {"nombre": "color", "etiqueta": "Color", "tipo": "string", "operadores": ["exact"], "agregable": False, "agrupable": True},
+            {"nombre": "cantidad", "etiqueta": "Cantidad", "tipo": "number", "operadores": ["exact", "gte", "lte"], "agregable": True, "agrupable": False},
+            {"nombre": "precio_unitario", "etiqueta": "Precio Unitario (Bs)", "tipo": "number", "operadores": ["exact", "gte", "lte"], "agregable": True, "agrupable": False},
+            {"nombre": "subtotal", "etiqueta": "Subtotal (Bs)", "tipo": "number", "operadores": ["exact", "gte", "lte"], "agregable": True, "agrupable": False},
+            {"nombre": "fecha", "etiqueta": "Fecha", "tipo": "date", "operadores": ["exact", "gte", "lte"], "agregable": False, "agrupable": True}
+        ]
+    },
+    {
         "nombre": "clientes",
         "etiqueta": "Clientes y Fidelización",
         "campos": [
@@ -88,17 +103,29 @@ VISTAS_CONFIG = [
 
 class QbeFiltroItem(BaseModel):
     campo: str
-    operador: str
-    valor: Any
+    operador: Optional[str] = "exact"
+    valor: Any = None
+
+
+class MetricaAgrupadaItem(BaseModel):
+    campo: str
+    operacion: str = "sum"
+    alias: Optional[str] = None
 
 
 class QbePayload(BaseModel):
-    vista: str
+    vista: Optional[str] = None
+    vista_logica: Optional[str] = None
     columnas: Optional[List[str]] = None
-    filtros: Optional[List[QbeFiltroItem]] = []
+    filtros: Optional[List[Any]] = []
+    filtros_avanzados: Optional[Any] = None
+    agrupar_por: Optional[List[str]] = None
+    metricas_agrupadas: Optional[List[Any]] = None
+    filtros_having: Optional[List[Any]] = []
     ordenar_por: Optional[str] = None
     orden_ascendente: Optional[bool] = True
-    limite: Optional[int] = 100
+    paginacion: Optional[Any] = None
+    limite: Optional[int] = 500
 
 
 class NLPPayload(BaseModel):
@@ -115,7 +142,7 @@ def _get_vistas_impl():
 
 
 def _ejecutar_qbe_impl(payload: QbePayload, db: Session = Depends(get_db)):
-    vista_nom = payload.vista.lower().strip()
+    vista_nom = (payload.vista_logica or payload.vista or "ventas").lower().strip()
     filas = []
 
     # 1. VISTA: VENTAS
@@ -127,7 +154,7 @@ def _ejecutar_qbe_impl(payload: QbePayload, db: Session = Depends(get_db)):
             joinedload(Venta.metodo_pago),
             joinedload(Venta.tipo_venta)
         )
-        ventas_db = query.order_by(desc(Venta.id)).limit(payload.limite or 100).all()
+        ventas_db = query.order_by(desc(Venta.id)).limit(payload.limite or 500).all()
 
         for v in ventas_db:
             cli_nom = "Consumidor Final"
@@ -160,7 +187,7 @@ def _ejecutar_qbe_impl(payload: QbePayload, db: Session = Depends(get_db)):
             joinedload(InventarioSucursal.variante).joinedload(VariantePrenda.talla),
             joinedload(InventarioSucursal.variante).joinedload(VariantePrenda.color)
         )
-        invs_db = query.order_by(asc(InventarioSucursal.stock_fisico - InventarioSucursal.stock_reservado)).limit(payload.limite or 100).all()
+        invs_db = query.order_by(asc(InventarioSucursal.stock_fisico - InventarioSucursal.stock_reservado)).limit(payload.limite or 500).all()
 
         for inv in invs_db:
             var = inv.variante
@@ -190,9 +217,35 @@ def _ejecutar_qbe_impl(payload: QbePayload, db: Session = Depends(get_db)):
             }
             filas.append(row_data)
 
-    # 3. VISTA: CLIENTES
+    # 3. VISTA: DETALLE_VENTA / RANKING
+    elif vista_nom in ["detalle_venta", "detalles", "ranking", "prendas_vendidas"]:
+        detalles_db = db.query(DetalleVenta).options(
+            joinedload(DetalleVenta.venta),
+            joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria),
+            joinedload(DetalleVenta.variante).joinedload(VariantePrenda.talla),
+            joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
+        ).order_by(desc(DetalleVenta.id)).limit(payload.limite or 500).all()
+
+        for d in detalles_db:
+            var = d.variante
+            prenda = var.ropa if var else None
+            row_data = {
+                "id": d.id,
+                "prenda_nombre": prenda.nombre if prenda else f"Variante #{d.variante_id}",
+                "categoria_nombre": prenda.categoria.nombre if (prenda and prenda.categoria) else "General",
+                "talla": var.talla.medida if (var and var.talla) else "Única",
+                "color": var.color.nombre if (var and var.color) else "Estándar",
+                "cantidad": d.cantidad,
+                "precio_unitario": float(d.precio_unitario),
+                "subtotal": float(d.subtotal),
+                "descuento": float(d.descuento if d.descuento is not None else 0.0),
+                "fecha": d.venta.fecha.strftime("%Y-%m-%d %H:%M") if (d.venta and d.venta.fecha) else ""
+            }
+            filas.append(row_data)
+
+    # 4. VISTA: CLIENTES
     else:
-        clientes_db = db.query(Cliente).limit(payload.limite or 100).all()
+        clientes_db = db.query(Cliente).limit(payload.limite or 500).all()
         for c in clientes_db:
             ventas_cli = db.query(Venta).filter(Venta.cliente_id == c.ci, Venta.estado_pago.in_(["COMPLETADA", "PAGADA"])).all()
             total_gastado = sum(float(v.monto_neto if v.monto_neto is not None else v.total) for v in ventas_cli)
@@ -207,9 +260,57 @@ def _ejecutar_qbe_impl(payload: QbePayload, db: Session = Depends(get_db)):
             }
             filas.append(row_data)
 
+    # APLICAR FILTROS EN MEMORIA SI EXISTEN
+    if payload.filtros:
+        def cumple_filtro(row, f):
+            campo = f.get("campo") if isinstance(f, dict) else getattr(f, "campo", None)
+            op = (f.get("operador") if isinstance(f, dict) else getattr(f, "operador", "exact")) or "exact"
+            val = f.get("valor") if isinstance(f, dict) else getattr(f, "valor", None)
+            
+            if not campo or campo not in row or val is None:
+                return True
+            
+            r_val = row[campo]
+            str_r = str(r_val).lower()
+            str_v = str(val).lower()
+
+            if op == "exact":
+                return str_r == str_v
+            elif op == "neq":
+                return str_r != str_v
+            elif op in ["contains", "icontains"]:
+                return str_v in str_r
+            elif op == "startswith":
+                return str_r.startswith(str_v)
+            elif op == "gte":
+                try:
+                    return float(r_val) >= float(val)
+                except Exception:
+                    return str_r >= str_v
+            elif op == "lte":
+                try:
+                    return float(r_val) <= float(val)
+                except Exception:
+                    return str_r <= str_v
+            elif op == "gt":
+                try:
+                    return float(r_val) > float(val)
+                except Exception:
+                    return str_r > str_v
+            elif op == "lt":
+                try:
+                    return float(r_val) < float(val)
+                except Exception:
+                    return str_r < str_v
+            elif op == "month":
+                return f"-{int(val):02d}-" in str_r
+            return True
+
+        filas = [r for r in filas if all(cumple_filtro(r, f) for f in payload.filtros)]
+
     # Filtrar solo las columnas solicitadas si se especificaron
     if payload.columnas and len(payload.columnas) > 0:
-        columnas_finales = payload.columnas
+        columnas_finales = [c for c in payload.columnas if c in filas[0]] if filas else payload.columnas
         filas_filtradas = [
             {col: r.get(col, "") for col in columnas_finales}
             for r in filas

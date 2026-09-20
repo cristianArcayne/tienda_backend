@@ -11,6 +11,7 @@ from sqlalchemy import or_, and_
 
 from database import get_db
 from models.catalogo import Ropa, Categoria, Promocion, PromocionRopa
+from routers.notificaciones import crear_notificacion_sistema
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -26,37 +27,52 @@ class PrendaAsociadaInfo(BaseModel):
 
 
 class PromocionCreate(BaseModel):
-    nombre: str = Field(..., min_length=2, max_length=150)
+    nombre: Optional[str] = None
+    titulo: Optional[str] = None
     descripcion: Optional[str] = None
-    porcentaje_descuento: float = Field(..., gt=0, le=100)
-    fecha_inicio: datetime
-    fecha_fin: datetime
+    porcentaje_descuento: Optional[float] = None
+    valor_descuento: Optional[float] = None
+    tipo_descuento: Optional[str] = "porcentaje"
+    fecha_inicio: Optional[datetime] = None
+    fecha_fin: Optional[datetime] = None
     activo: Optional[bool] = True
     ropas_ids: Optional[List[int]] = []
+    producto_id: Optional[Union[int, str]] = None
+    producto: Optional[Union[int, str]] = None
     categoria_id: Optional[int] = None
 
 
 class PromocionUpdate(BaseModel):
-    nombre: Optional[str] = Field(None, min_length=2, max_length=150)
+    nombre: Optional[str] = None
+    titulo: Optional[str] = None
     descripcion: Optional[str] = None
-    porcentaje_descuento: Optional[float] = Field(None, gt=0, le=100)
+    porcentaje_descuento: Optional[float] = None
+    valor_descuento: Optional[float] = None
     fecha_inicio: Optional[datetime] = None
     fecha_fin: Optional[datetime] = None
     activo: Optional[bool] = None
     ropas_ids: Optional[List[int]] = None
+    producto_id: Optional[Union[int, str]] = None
+    producto: Optional[Union[int, str]] = None
     categoria_id: Optional[int] = None
 
 
 class PromocionResponse(BaseModel):
     id: int
     nombre: str
+    titulo: Optional[str] = None
     descripcion: Optional[str] = None
     porcentaje_descuento: float
+    valor_descuento: Optional[float] = None
+    tipo_descuento: Optional[str] = "porcentaje"
+    producto_nombre: Optional[str] = None
     fecha_inicio: datetime
     fecha_fin: datetime
+    fecha_publicacion: Optional[str] = None
     activo: bool = True
     esta_vigente: bool = False
     estado_calculado: str = "ACTIVA"  # ACTIVA, EXPIRADA, PROGRAMADA, INACTIVA
+    estado: Optional[str] = "ACTIVA"
     total_prendas_asociadas: int = 0
     prendas: List[PrendaAsociadaInfo] = []
 
@@ -121,16 +137,25 @@ def map_promocion_to_response(p: Promocion) -> PromocionResponse:
                 )
             )
 
+    prod_nombre = prendas_info[0].nombre if len(prendas_info) > 0 else "Catálogo General"
+    fecha_pub_str = p.fecha_inicio.isoformat() if p.fecha_inicio else None
+
     return PromocionResponse(
         id=p.id,
         nombre=p.nombre,
+        titulo=p.nombre,
         descripcion=p.descripcion,
         porcentaje_descuento=desc_pct,
+        valor_descuento=desc_pct,
+        tipo_descuento="porcentaje",
+        producto_nombre=prod_nombre,
         fecha_inicio=p.fecha_inicio,
         fecha_fin=p.fecha_fin,
+        fecha_publicacion=fecha_pub_str,
         activo=p.activo,
         esta_vigente=vigente,
         estado_calculado=estado,
+        estado=estado,
         total_prendas_asociadas=len(prendas_info),
         prendas=prendas_info
     )
@@ -213,24 +238,39 @@ def _obtener_promocion_impl(promo_id: int, db: Session = Depends(get_db)) -> Pro
 
 
 def _crear_promocion_impl(promo_in: PromocionCreate, db: Session = Depends(get_db)) -> PromocionResponse:
-    if promo_in.fecha_fin < promo_in.fecha_inicio:
+    nombre_val = (promo_in.nombre or promo_in.titulo or "Promoción Especial").strip()
+    desc_val = (promo_in.descripcion or "").strip() or None
+    desc_pct = float(promo_in.porcentaje_descuento or promo_in.valor_descuento or 10.0)
+
+    # Fechas por defecto si vienen vacías
+    now_utc = datetime.now(timezone.utc)
+    inicio = promo_in.fecha_inicio or now_utc
+    fin = promo_in.fecha_fin or datetime(now_utc.year + 1, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    if fin < inicio:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Excepción A1: La fecha de finalización no puede ser anterior a la fecha de inicio."
         )
 
     nueva_promo = Promocion(
-        nombre=promo_in.nombre.strip(),
-        descripcion=promo_in.descripcion.strip() if promo_in.descripcion else None,
-        porcentaje_descuento=promo_in.porcentaje_descuento,
-        fecha_inicio=promo_in.fecha_inicio,
-        fecha_fin=promo_in.fecha_fin,
+        nombre=nombre_val,
+        descripcion=desc_val,
+        porcentaje_descuento=desc_pct,
+        fecha_inicio=inicio,
+        fecha_fin=fin,
         activo=promo_in.activo if promo_in.activo is not None else True
     )
     db.add(nueva_promo)
     db.flush()
 
     ropas_set = set(promo_in.ropas_ids or [])
+    prod_raw = promo_in.producto_id or promo_in.producto
+    if prod_raw:
+        try:
+            ropas_set.add(int(prod_raw))
+        except Exception:
+            pass
 
     # Si se especificó una categoría, agregar todas las prendas de esa categoría
     if promo_in.categoria_id:
@@ -245,6 +285,17 @@ def _crear_promocion_impl(promo_in: PromocionCreate, db: Session = Depends(get_d
 
     db.commit()
     db.refresh(nueva_promo)
+
+    # Disparar notificación push/in-app inmediatamente
+    try:
+        crear_notificacion_sistema(
+            db=db,
+            titulo=f"🏷️ Promoción: {nueva_promo.nombre}",
+            mensaje=f"¡Aprovecha {nueva_promo.porcentaje_descuento:.0f}% de descuento! {nueva_promo.descripcion or 'Disponible en tienda.'}",
+            tipo="PROMOCION"
+        )
+    except Exception as e:
+        print(f"[Promociones] Error al emitir notificación: {e}")
 
     return map_promocion_to_response(nueva_promo)
 
@@ -320,6 +371,18 @@ def _toggle_estado_impl(promo_id: int, db: Session = Depends(get_db)) -> Promoci
     promo.activo = not promo.activo
     db.commit()
     db.refresh(promo)
+
+    if promo.activo:
+        try:
+            crear_notificacion_sistema(
+                db=db,
+                titulo=f"🎉 ¡Promoción Publicada: {promo.nombre}!",
+                mensaje=f"¡Aprovecha {promo.porcentaje_descuento:.0f}% de descuento! {promo.descripcion or 'Disponible ahora en FashionStore.'}",
+                tipo="PROMOCION"
+            )
+        except Exception as e:
+            print(f"[Promociones] Error al emitir notificación: {e}")
+
     return map_promocion_to_response(promo)
 
 
