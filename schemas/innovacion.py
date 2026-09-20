@@ -149,21 +149,34 @@ class ReporteVozResponse(BaseModel):
 # =========================================================================
 
 class ResenaCreateRequest(BaseModel):
-    ropa_id: int
-    cliente_ci: Union[str, int]
+    ropa_id: Optional[int] = None
+    producto_id: Optional[int] = None
+    cliente_ci: Optional[Union[str, int]] = "admin"
     cliente_nombre: Optional[str] = None
-    puntuacion_estrellas: int = Field(..., ge=1, le=5, description="Calificación de 1 a 5 estrellas")
+    puntuacion_estrellas: Optional[int] = None
+    calificacion: Optional[int] = None
+    comentario: Optional[str] = Field(None, max_length=1000)
+
+
+class ResenaUpdateRequest(BaseModel):
+    puntuacion_estrellas: Optional[int] = None
+    calificacion: Optional[int] = None
     comentario: Optional[str] = Field(None, max_length=1000)
 
 
 class ResenaItemResponse(BaseModel):
     id: int
     ropa_id: int
+    producto: Optional[int] = None
     cliente_ci: Union[str, int]
     cliente_nombre: Optional[str] = None
+    usuario_username: Optional[str] = None
+    usuario: Optional[int] = None
     puntuacion_estrellas: int
+    calificacion: Optional[int] = None
     comentario: Optional[str] = None
     fecha: date
+    fecha_creacion: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

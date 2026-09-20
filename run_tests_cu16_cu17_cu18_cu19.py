@@ -54,7 +54,7 @@ def inicializar_bd(db):
 
 
     # 2. Cliente
-    cli = Cliente(ci=2001, nombre="Elena Morales", telefono="70012345", correo="elena@test.com")
+    cli = Cliente(ci=2001, nombre="Elena", apellido_pat="Morales", telefono="70012345", correo="elena@test.com")
     db.add(cli)
     db.flush()
 
@@ -104,8 +104,8 @@ def inicializar_bd(db):
     db.add_all([v1, v2])
     db.flush()
 
-    inv1 = InventarioSucursal(sucursal_id=suc.id, variante_id=v1.id, stock_fisico=20, stock_reservado=0, stock_disponible=20)
-    inv2 = InventarioSucursal(sucursal_id=suc.id, variante_id=v2.id, stock_fisico=3, stock_reservado=0, stock_disponible=3)
+    inv1 = InventarioSucursal(sucursal_id=suc.id, variante_id=v1.id, stock_fisico=20, stock_reservado=0)
+    inv2 = InventarioSucursal(sucursal_id=suc.id, variante_id=v2.id, stock_fisico=3, stock_reservado=0)
     db.add_all([inv1, inv2])
     db.flush()
 

@@ -40,8 +40,8 @@ def inicializar_datos(db):
     db.flush()
 
     # 2. Empleado y Cliente
-    emp = Empleado(ci=101, nombre="Luis Arce (Cajero)", telefono="70011111", correo="cajero@test.bo")
-    cli = Cliente(ci=201, nombre="María Suárez", telefono="70022222", correo="maria@test.bo")
+    emp = Empleado(ci=101, nombre="Luis", apellido_pat="Arce", telefono="70011111", correo="cajero@test.bo")
+    cli = Cliente(ci=201, nombre="María", apellido_pat="Suárez", telefono="70022222", correo="maria@test.bo")
     db.add_all([emp, cli])
     db.flush()
 
@@ -73,7 +73,7 @@ def inicializar_datos(db):
     db.flush()
 
     # Inventario: 10 fisico, 0 reservado
-    inv = InventarioSucursal(sucursal_id=suc.id, variante_id=var.id, stock_fisico=10, stock_reservado=0, stock_disponible=10)
+    inv = InventarioSucursal(sucursal_id=suc.id, variante_id=var.id, stock_fisico=10, stock_reservado=0)
     db.add(inv)
     db.commit()
 
@@ -143,7 +143,6 @@ def run_tests():
     db.add(DetalleCarritoCompra(carrito_id=cart.id, variante_id=var.id, cantidad=2))
     # Simular apartado temporal
     inv_check.stock_reservado = 2
-    inv_check.stock_disponible = inv_check.stock_fisico - inv_check.stock_reservado
     db.commit()
 
     # 2. Excepción A1: Pago rechazado por pasarela externa (Rollback)

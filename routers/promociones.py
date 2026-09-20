@@ -44,6 +44,7 @@ class PromocionUpdate(BaseModel):
     fecha_fin: Optional[datetime] = None
     activo: Optional[bool] = None
     ropas_ids: Optional[List[int]] = None
+    categoria_id: Optional[int] = None
 
 
 class PromocionResponse(BaseModel):
@@ -279,10 +280,15 @@ def _actualizar_promocion_impl(
             detail="La fecha de finalización no puede ser anterior a la fecha de inicio."
         )
 
-    # Actualizar prendas asociadas si se envió la lista
-    if promo_in.ropas_ids is not None:
+    # Actualizar prendas asociadas si se envió la lista o la categoría
+    if promo_in.ropas_ids is not None or promo_in.categoria_id is not None:
         db.query(PromocionRopa).filter(PromocionRopa.promocion_id == promo_id).delete()
-        for r_id in promo_in.ropas_ids:
+        ropas_set = set(promo_in.ropas_ids or [])
+        if promo_in.categoria_id:
+            ropas_cat = db.query(Ropa.id).filter(Ropa.categoria_id == promo_in.categoria_id).all()
+            for (r_id,) in ropas_cat:
+                ropas_set.add(r_id)
+        for r_id in ropas_set:
             ropa = db.query(Ropa).filter(Ropa.id == r_id).first()
             if ropa:
                 db.add(PromocionRopa(promocion_id=promo.id, ropa_id=r_id, estado="ACTIVA"))

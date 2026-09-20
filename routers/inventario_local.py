@@ -100,8 +100,28 @@ router_compat = APIRouter(
 
 
 def _garantizar_inventario_sucursal(db: Session, sucursal_id: int):
-    """Garantiza que todas las variantes activas tengan un registro en la sucursal"""
-    variantes = db.query(VariantePrenda).all()
+    """Garantiza que todas las ropas tengan variantes y que todas las variantes tengan un registro en la sucursal"""
+    # 1. Asegurar que toda Ropa activa tenga al menos una variante
+    ropas = db.query(Ropa).filter(Ropa.activo == True).all()
+    talla_def = db.query(Talla).filter(Talla.medida == "M").first() or db.query(Talla).first()
+    color_def = db.query(Color).first()
+
+    for r in ropas:
+        cnt_vars = db.query(VariantePrenda).filter(VariantePrenda.ropa_id == r.id).count()
+        if cnt_vars == 0:
+            sku_prefix = "".join([c for c in r.nombre if c.isalnum()][:4]).upper() or "ROP"
+            nueva_var = VariantePrenda(
+                ropa_id=r.id,
+                talla_id=talla_def.id if talla_def else 1,
+                color_id=color_def.id if color_def else 1,
+                sku=f"{sku_prefix}-{r.id}-M-STD",
+                cod_barra=f"BAR-{r.id}-{sku_prefix}",
+                activo=True
+            )
+            db.add(nueva_var)
+            db.flush()
+
+    variantes = db.query(VariantePrenda).filter(VariantePrenda.activo == True).all()
     existentes = {
         inv.variante_id for inv in db.query(InventarioSucursal).filter(InventarioSucursal.sucursal_id == sucursal_id).all()
     }
@@ -119,7 +139,7 @@ def _garantizar_inventario_sucursal(db: Session, sucursal_id: int):
             )
     if nuevos:
         db.add_all(nuevos)
-        db.commit()
+    db.commit()
 
 
 def _obtener_inventario_sucursal_impl(
@@ -430,32 +450,36 @@ def _listar_movimientos_impl(
 
 # Registrar endpoints en ambos routers
 for r in [router, router_compat]:
-    r.add_api_route(
-        "/sucursal/{sucursal_id}",
-        _obtener_inventario_sucursal_impl,
-        methods=["GET"],
-        response_model=ResumenInventarioSucursal,
-        summary="Consultar existencias de inventario físico local por sucursal"
-    )
-    r.add_api_route(
-        "/entrada",
-        _registrar_entrada_impl,
-        methods=["POST"],
-        response_model=VarianteStockItem,
-        status_code=status.HTTP_201_CREATED,
-        summary="Registrar entrada de mercadería a la sucursal"
-    )
-    r.add_api_route(
-        "/ajuste",
-        _registrar_ajuste_impl,
-        methods=["POST"],
-        response_model=VarianteStockItem,
-        summary="Registrar ajuste por merma, daño o conteo físico"
-    )
-    r.add_api_route(
-        "/movimientos/{sucursal_id}",
-        _listar_movimientos_impl,
-        methods=["GET"],
-        response_model=List[MovimientoKardexResponse],
-        summary="Consultar historial de movimientos (Kardex) de la sucursal"
-    )
+    for p in ["/sucursal/{sucursal_id}", "/sucursal/{sucursal_id}/"]:
+        r.add_api_route(
+            p,
+            _obtener_inventario_sucursal_impl,
+            methods=["GET"],
+            response_model=ResumenInventarioSucursal,
+            summary="Consultar existencias de inventario físico local por sucursal"
+        )
+    for p in ["/entrada", "/entrada/", "/entrada-mercaderia", "/entrada-mercaderia/"]:
+        r.add_api_route(
+            p,
+            _registrar_entrada_impl,
+            methods=["POST"],
+            response_model=VarianteStockItem,
+            status_code=status.HTTP_201_CREATED,
+            summary="Registrar entrada de mercadería a la sucursal"
+        )
+    for p in ["/ajuste", "/ajuste/"]:
+        r.add_api_route(
+            p,
+            _registrar_ajuste_impl,
+            methods=["POST"],
+            response_model=VarianteStockItem,
+            summary="Registrar ajuste por merma, daño o conteo físico"
+        )
+    for p in ["/movimientos/{sucursal_id}", "/movimientos/{sucursal_id}/"]:
+        r.add_api_route(
+            p,
+            _listar_movimientos_impl,
+            methods=["GET"],
+            response_model=List[MovimientoKardexResponse],
+            summary="Consultar historial de movimientos (Kardex) de la sucursal"
+        )

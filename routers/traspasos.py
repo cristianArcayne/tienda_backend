@@ -400,13 +400,14 @@ for r in [router, router_compat]:
         response_model=TraspasoResponse,
         summary="Despachar mercadería (pasar a EN_TRANSITO)"
     )
-    r.add_api_route(
-        "/{traspaso_id}/confirmar_recepcion",
-        _confirmar_recepcion_impl,
-        methods=["POST"],
-        response_model=TraspasoResponse,
-        summary="Confirmar recepción en destino (sumar al inventario local)"
-    )
+    for path in ["/{traspaso_id}/confirmar_recepcion", "/{traspaso_id}/confirmar_recepcion/", "/{traspaso_id}/confirmar-recepcion", "/{traspaso_id}/confirmar-recepcion/"]:
+        r.add_api_route(
+            path,
+            _confirmar_recepcion_impl,
+            methods=["POST", "PUT"],
+            response_model=TraspasoResponse,
+            summary="Confirmar recepción en destino (sumar al inventario local)"
+        )
     r.add_api_route(
         "/{traspaso_id}/cancelar",
         _cancelar_traspaso_impl,

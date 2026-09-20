@@ -24,7 +24,7 @@ from models.catalogo import (
     PromocionRopa,
     Resena
 )
-from models.sucursal import InventarioSucursal
+from models.sucursal import InventarioSucursal, Sucursal
 from schemas.catalogo import (
     RopaCreate,
     RopaResponse,
@@ -111,7 +111,7 @@ def _normalizar_media_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
-def _formatear_producto_angular(ropa: Ropa, db: Session = None) -> dict:
+def _formatear_producto_angular(ropa: Ropa, db: Session = None, sucursal_id: Optional[int] = None) -> dict:
     """Formato compatible al 100% con Angular Producto / Multimedia / Variantes"""
     img_url = _normalizar_media_url(ropa.imagen_uri)
     m3d_url = _normalizar_media_url(ropa.modelo_3d_uri)
@@ -165,9 +165,15 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None) -> dict:
         
         stock_total = 0
         if v.inventarios_sucursal:
-            stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in v.inventarios_sucursal)
+            if sucursal_id:
+                stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in v.inventarios_sucursal if inv.sucursal_id == sucursal_id)
+            else:
+                stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in v.inventarios_sucursal)
         elif db:
-            invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id).all()
+            if sucursal_id:
+                invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id, InventarioSucursal.sucursal_id == sucursal_id).all()
+            else:
+                invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id).all()
             stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in invs)
         
         variantes_list.append({
@@ -190,6 +196,20 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None) -> dict:
             "color": {"id": v.color.id, "nombre": v.color.nombre, "codigo_hex": color_hex} if v.color else None
         })
 
+    stock_total_producto = sum(v["stock"] for v in variantes_list)
+
+    # Calcular reseñas y calificación promedio
+    total_resenas = 0
+    calificacion_promedio = None
+    resenas_list = getattr(ropa, 'resenas', None)
+    if resenas_list is None and db is not None:
+        resenas_list = db.query(Resena).filter(Resena.ropa_id == ropa.id).all()
+    if resenas_list:
+        total_resenas = len(resenas_list)
+        califs = [r.puntuacion_estrellas for r in resenas_list if r.puntuacion_estrellas is not None]
+        if califs:
+            calificacion_promedio = round(sum(califs) / len(califs), 1)
+
     return {
         "id": ropa.id,
         "nombre": ropa.nombre,
@@ -208,12 +228,17 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None) -> dict:
         "porcentaje_descuento": mejor_descuento or 0.0,
         "en_oferta": en_oferta,
         "costo_estandar": float(ropa.costo_estandar or 0.0),
-        "imagen_uri": ropa.imagen_uri,
-        "imagen_principal": ropa.imagen_uri,
-        "modelo_3d_uri": ropa.modelo_3d_uri,
+        "calificacion_promedio": calificacion_promedio,
+        "total_resenas": total_resenas,
+        "imagen_uri": img_url,
+        "imagen_principal": img_url,
+        "modelo_3d_uri": m3d_url,
         "imagenes": imagenes,
         "modelos_3d": modelos_3d,
         "variantes": variantes_list,
+        "stock_total": stock_total_producto,
+        "disponible_en_sucursal": stock_total_producto > 0,
+        "sucursal_filtrada": sucursal_id,
         "tiene_modelo_ar": bool(ropa.modelo_3d_uri)
     }
 
@@ -317,6 +342,33 @@ def crear_prenda(prenda_in: RopaCreate, db: Session = Depends(get_db)):
     db.add(nueva_ropa)
     db.commit()
     db.refresh(nueva_ropa)
+
+    # Crear variante base y existencias en sucursales para que aparezca en inventario físico y ventas
+    talla_def = db.query(Talla).filter(Talla.medida == "M").first() or db.query(Talla).first()
+    color_def = db.query(Color).first()
+    sku_prefix = "".join([c for c in nueva_ropa.nombre if c.isalnum()][:4]).upper() or "ROP"
+    def_var = VariantePrenda(
+        ropa_id=nueva_ropa.id,
+        talla_id=talla_def.id if talla_def else 1,
+        color_id=color_def.id if color_def else 1,
+        sku=f"{sku_prefix}-{nueva_ropa.id}-M-STD",
+        cod_barra=f"BAR-{nueva_ropa.id}-{sku_prefix}",
+        activo=True
+    )
+    db.add(def_var)
+    db.commit()
+    db.refresh(def_var)
+
+    sucursales = db.query(Sucursal).all()
+    for suc in sucursales:
+        db.add(InventarioSucursal(
+            sucursal_id=suc.id,
+            variante_id=def_var.id,
+            stock_fisico=0,
+            stock_reservado=0,
+            stock_minimo=5
+        ))
+    db.commit()
 
     return _formatear_ropa(nueva_ropa)
 
@@ -442,6 +494,7 @@ router_catalogo_compat = APIRouter(
 def listar_catalogo_compat(
     categoria: Optional[int] = None,
     categoria_id: Optional[int] = None,
+    sucursal_id: Optional[int] = None,
     search: Optional[str] = None,
     page: Optional[int] = None,
     page_size: int = 10,
@@ -454,7 +507,8 @@ def listar_catalogo_compat(
         joinedload(Ropa.proveedor),
         joinedload(Ropa.variantes).joinedload(VariantePrenda.talla),
         joinedload(Ropa.variantes).joinedload(VariantePrenda.color),
-        joinedload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion)
+        joinedload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion),
+        joinedload(Ropa.resenas)
     )
     if cat_filtro:
         query = query.filter(Ropa.categoria_id == cat_filtro)
@@ -464,7 +518,7 @@ def listar_catalogo_compat(
     total = query.count()
     if page is not None:
         ropas = query.order_by(Ropa.id.asc()).offset((page - 1) * page_size).limit(page_size).all()
-        res = [_formatear_producto_angular(r, db=db) for r in ropas]
+        res = [_formatear_producto_angular(r, db=db, sucursal_id=sucursal_id) for r in ropas]
         base = "/api/catalogo/"
         return {
             "count": total,
@@ -474,7 +528,7 @@ def listar_catalogo_compat(
         }
     else:
         ropas = query.order_by(Ropa.id.asc()).all()
-        return [_formatear_producto_angular(r, db=db) for r in ropas]
+        return [_formatear_producto_angular(r, db=db, sucursal_id=sucursal_id) for r in ropas]
 
 @router_catalogo_compat.get("/{ropa_id}")
 @router_catalogo_compat.get("/{ropa_id}/")
@@ -483,6 +537,46 @@ def obtener_catalogo_compat(ropa_id: int, db: Session = Depends(get_db)):
     if not ropa:
         raise HTTPException(status_code=404, detail="Prenda no encontrada")
     return _formatear_producto_angular(ropa, db=db)
+
+
+@router_catalogo_compat.get("/ropas")
+@router_catalogo_compat.get("/ropas/")
+def listar_catalogo_ropas_compat(db: Session = Depends(get_db)):
+    return listar_catalogo_compat(page=None, db=db)
+
+
+router_catalogo_v1 = APIRouter(
+    prefix="/api/v1/catalogo",
+    tags=["CU07. Catálogo Web v1"]
+)
+
+@router_catalogo_v1.get("/")
+@router_catalogo_v1.get("")
+@router_catalogo_v1.get("/ropas")
+@router_catalogo_v1.get("/ropas/")
+def listar_catalogo_v1(
+    categoria: Optional[int] = None,
+    categoria_id: Optional[int] = None,
+    sucursal_id: Optional[int] = None,
+    search: Optional[str] = None,
+    page: Optional[int] = None,
+    page_size: int = 10,
+    db: Session = Depends(get_db)
+):
+    return listar_catalogo_compat(
+        categoria=categoria,
+        categoria_id=categoria_id,
+        sucursal_id=sucursal_id,
+        search=search,
+        page=page,
+        page_size=page_size,
+        db=db
+    )
+
+@router_catalogo_v1.get("/{ropa_id}")
+@router_catalogo_v1.get("/{ropa_id}/")
+def obtener_catalogo_v1(ropa_id: int, db: Session = Depends(get_db)):
+    return obtener_catalogo_compat(ropa_id=ropa_id, db=db)
 
 
 router_productos_compat = APIRouter(
@@ -651,6 +745,49 @@ def listar_marcas_compat(
     return results
 
 
+@router_marcas_compat.post("/")
+@router_marcas_compat.post("")
+def crear_marca_compat(data: dict, db: Session = Depends(get_db)):
+    nombre = (data.get("nombre") or "").strip()
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre de la marca es obligatorio.")
+    if db.query(exists().where(Proveedor.razon_social == nombre)).scalar():
+        raise HTTPException(status_code=400, detail=f"La marca '{nombre}' ya existe.")
+    nuevo = Proveedor(razon_social=nombre)
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return {"id": nuevo.id, "nombre": nuevo.razon_social, "descripcion": f"Proveedor {nuevo.razon_social}"}
+
+
+@router_marcas_compat.put("/{marca_id}")
+@router_marcas_compat.put("/{marca_id}/")
+def actualizar_marca_compat(marca_id: int, data: dict, db: Session = Depends(get_db)):
+    p = db.query(Proveedor).filter(Proveedor.id == marca_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Marca no encontrada.")
+    nombre = (data.get("nombre") or "").strip()
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre de la marca es obligatorio.")
+    p.razon_social = nombre
+    db.commit()
+    db.refresh(p)
+    return {"id": p.id, "nombre": p.razon_social, "descripcion": f"Proveedor {p.razon_social}"}
+
+
+@router_marcas_compat.delete("/{marca_id}")
+@router_marcas_compat.delete("/{marca_id}/")
+def eliminar_marca_compat(marca_id: int, db: Session = Depends(get_db)):
+    p = db.query(Proveedor).filter(Proveedor.id == marca_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Marca no encontrada.")
+    if db.query(exists().where(Ropa.proveedor_id == marca_id)).scalar():
+        raise HTTPException(status_code=400, detail="Restricción: La marca tiene prendas asociadas en el catálogo.")
+    db.delete(p)
+    db.commit()
+    return {"message": "Marca eliminada exitosamente", "id": marca_id}
+
+
 # ─── Endpoint para Subida de Multimedia / Modelos 3D (/api/multimedios) ──────
 router_multimedios_compat = APIRouter(
     prefix="/api/multimedios",
@@ -718,6 +855,7 @@ router_variantes_compat = APIRouter(
 def listar_variantes_compat(
     producto_id: Optional[int] = None,
     ropa_id: Optional[int] = None,
+    sucursal_id: Optional[int] = None,
     page: Optional[int] = None,
     page_size: int = 1000,
     db: Session = Depends(get_db)
@@ -746,10 +884,16 @@ def listar_variantes_compat(
         color_hx = v.color.codigo_hex if v.color else "#000000"
         
         # Stock real físico
-        stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in (v.inventarios_sucursal or []))
-        if stock_total == 0 and not v.inventarios_sucursal:
-            invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id).all()
-            stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in invs)
+        if sucursal_id:
+            inv_suc = next((inv for inv in (v.inventarios_sucursal or []) if inv.sucursal_id == sucursal_id), None)
+            if not inv_suc:
+                inv_suc = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id, InventarioSucursal.sucursal_id == sucursal_id).first()
+            stock_total = (inv_suc.stock_disponible or inv_suc.stock_fisico or 0) if inv_suc else 0
+        else:
+            stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in (v.inventarios_sucursal or []))
+            if stock_total == 0 and not v.inventarios_sucursal:
+                invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id).all()
+                stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in invs)
         
         # Descuento promocional activo
         mejor_descuento = 0.0

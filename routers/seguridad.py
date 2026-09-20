@@ -145,7 +145,25 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
         telefono=usuario.persona.telefono if usuario.persona else "",
         is_superuser=es_admin,
         roles=[rol_nombre],
-        permisos=["*"] if es_admin else ["LEER_CATALOGO", "COMPRAR"]
+        permisos=["*"] if es_admin else (
+            list(set([p.codename for p in usuario.rol.permisos] + [
+                "inventario.view_catalogo",
+                "inventario.view_producto",
+                "inventario.view_producto_detalle",
+                "compras.view_compra",
+                "ia.view_alerta",
+                "seguridad.add_prediccion",
+                "notificaciones.view_notificacion",
+                "LEER_CATALOGO",
+                "COMPRAR"
+            ])) if "cliente" in rol_nombre.lower() else (
+                [p.codename for p in usuario.rol.permisos] if (usuario.rol and usuario.rol.permisos) else [
+                    "inventario.view_catalogo",
+                    "inventario.view_producto",
+                    "venta.view_venta"
+                ]
+            )
+        )
     )
 
 @router.post("/api/logout/")

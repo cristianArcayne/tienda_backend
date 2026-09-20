@@ -3,7 +3,7 @@ Router para CU18: Generar Reportes Mediante Comandos de Voz y Analítica Gerenci
 Procesamiento de lenguaje natural / transcripción de audio, agregaciones SQL y generación de gráficos.
 """
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -365,55 +365,135 @@ def _interpretar_y_generar_reporte(comando: str, db: Session) -> ReporteVozRespo
     # -------------------------------------------------------------
     elif is_clientes:
         from models.seguridad_persona import Cliente
-        clientes_db = db.query(Cliente).limit(10).all()
-        datos_tabla = []
-        labels = []
-        montos = []
-        for c in clientes_db:
-            ventas_cli = db.query(Venta).filter(Venta.cliente_id == c.ci, Venta.estado_pago.in_(["COMPLETADA", "PAGADA"])).all()
-            tot_gastado = sum(float(v.monto_neto if v.monto_neto is not None else v.total) for v in ventas_cli)
-            nom = f"{c.nombre} {c.apellido_pat or ''}".strip()
-            labels.append(nom)
-            montos.append(tot_gastado)
-            datos_tabla.append({
-                "cliente": nom,
-                "ci": c.ci,
-                "correo": c.correo or "cliente@fashionstore.bo",
-                "total_compras": len(ventas_cli),
-                "monto_gastado": f"Bs. {tot_gastado:,.2f}",
-                "estado": "Beneficio Activo" if tot_gastado >= 100 else "Acumulando"
-            })
+        es_hoy = any(k in cmd_lower for k in ["hoy", "hoy dia", "hoy día", "de hoy"])
+        es_ayer = any(k in cmd_lower for k in ["ayer", "de ayer"])
+        today = date.today()
 
-        columnas_tabla = [
-            {"key": "cliente", "label": "Cliente"},
-            {"key": "ci", "label": "CI / NIT"},
-            {"key": "total_compras", "label": "Nro. Compras"},
-            {"key": "monto_gastado", "label": "Total Gastado (Bs)"},
-            {"key": "estado", "label": "Fidelización"}
-        ]
+        if es_hoy or es_ayer or any(k in cmd_lower for k in ["mas compraron", "más compraron", "compraron mas", "compraron más", "compraron", "gastaron"]):
+            cond_f = (func.date(Venta.fecha) == str(today)) if es_hoy else ((func.date(Venta.fecha) == str(today - timedelta(days=1))) if es_ayer else None)
+            q_ventas_c = db.query(
+                Venta.cliente_id,
+                func.count(Venta.id).label("total_compras"),
+                func.sum(Venta.total).label("total_gastado")
+            ).filter(Venta.estado_pago.in_(["COMPLETADA", "PAGADA"]))
+            if cond_f is not None:
+                q_ventas_c = q_ventas_c.filter(cond_f)
+            q_res = q_ventas_c.group_by(Venta.cliente_id).order_by(func.sum(Venta.total).desc()).all()
 
-        resumen = f"Padrón de Clientes: Se consultaron {len(clientes_db)} cuentas registradas. El volumen acumulado de compras refleja fidelización positiva en el ecosistema."
+            labels = []
+            montos = []
+            datos_tabla = []
+            for idx, (cid, num, tot) in enumerate(q_res, start=1):
+                tot_f = float(tot or 0.0)
+                nom = "Consumidor Final (POS)"
+                ci_txt = "S/N"
+                correo = "pos@fashionstore.bo"
+                if cid and str(cid).lower() == "admin":
+                    nom = "Super Admin"
+                    ci_txt = "admin"
+                    correo = "cliente_admin@fashionstore.com"
+                elif cid:
+                    c = db.query(Cliente).filter(Cliente.ci == cid).first()
+                    if c:
+                        nom = f"{c.nombre} {c.apellido_pat or ''}".strip()
+                        ci_txt = c.ci
+                        correo = c.correo or f"{cid}@fashionstore.bo"
+                labels.append(nom)
+                montos.append(tot_f)
+                datos_tabla.append({
+                    "cliente": f"#{idx} {nom}",
+                    "ci": ci_txt,
+                    "correo": correo,
+                    "total_compras": int(num or 0),
+                    "monto_gastado": f"Bs. {tot_f:,.2f}",
+                    "estado": "Beneficio Activo" if tot_f >= 100 else "Acumulando"
+                })
 
-        return ReporteVozResponse(
-            comando_reconocido=comando,
-            intencion_detectada="CLIENTES_Y_FIDELIZACION",
-            resumen_ejecutivo=resumen,
-            metricas_kpi={
-                "clientes_consultados": len(clientes_db),
-                "clientes_con_beneficio": sum(1 for m in montos if m >= 100)
-            },
-            datos_grafico=DatosGrafico(
-                tipo_grafico="bar",
-                labels=labels[:6],
-                series=[{"name": "Gasto Acumulado (Bs)", "data": montos[:6]}]
-            ),
-            datos_tabla=datos_tabla,
-            columnas_tabla=columnas_tabla,
-            sugerencias_siguientes_comandos=[
-                "Ventas por sucursal",
-                "Resumen general del negocio"
+            periodo_txt = "hoy" if es_hoy else ("ayer" if es_ayer else "el período")
+            if not datos_tabla:
+                resumen = f"Reporte de Clientes: No se registraron compras de clientes para {periodo_txt} en la base de datos de FashionStore."
+            else:
+                top_nom = labels[0] if labels else "N/A"
+                resumen = f"Ranking de Clientes ({periodo_txt}): Se registraron {len(datos_tabla)} compradores. El cliente líder es '{top_nom}' con un total facturado de Bs. {montos[0]:,.2f}."
+
+            columnas_tabla = [
+                {"key": "cliente", "label": "Cliente (Ranking)"},
+                {"key": "ci", "label": "CI / NIT"},
+                {"key": "total_compras", "label": "Compras Realizadas"},
+                {"key": "monto_gastado", "label": "Total Gastado (Bs)"},
+                {"key": "estado", "label": "Fidelización"}
             ]
-        )
+
+            return ReporteVozResponse(
+                comando_reconocido=comando,
+                intencion_detectada="CLIENTES_Y_FIDELIZACION",
+                resumen_ejecutivo=resumen,
+                metricas_kpi={
+                    "clientes_consultados": len(datos_tabla),
+                    "clientes_con_beneficio": sum(1 for m in montos if m >= 100)
+                },
+                datos_grafico=DatosGrafico(
+                    tipo_grafico="bar",
+                    labels=labels[:6] if labels else ["Sin compras"],
+                    series=[{"name": "Gasto Acumulado (Bs)", "data": montos[:6] if montos else [0.0]}]
+                ),
+                datos_tabla=datos_tabla,
+                columnas_tabla=columnas_tabla,
+                sugerencias_siguientes_comandos=[
+                    "Ventas por sucursal",
+                    "Cuáles son los productos más vendidos"
+                ]
+            )
+        else:
+            clientes_db = db.query(Cliente).limit(10).all()
+            datos_tabla = []
+            labels = []
+            montos = []
+            for c in clientes_db:
+                ventas_cli = db.query(Venta).filter(Venta.cliente_id == c.ci, Venta.estado_pago.in_(["COMPLETADA", "PAGADA"])).all()
+                tot_gastado = sum(float(v.monto_neto if v.monto_neto is not None else v.total) for v in ventas_cli)
+                nom = f"{c.nombre} {c.apellido_pat or ''}".strip()
+                labels.append(nom)
+                montos.append(tot_gastado)
+                datos_tabla.append({
+                    "cliente": nom,
+                    "ci": c.ci,
+                    "correo": c.correo or "cliente@fashionstore.bo",
+                    "total_compras": len(ventas_cli),
+                    "monto_gastado": f"Bs. {tot_gastado:,.2f}",
+                    "estado": "Beneficio Activo" if tot_gastado >= 100 else "Acumulando"
+                })
+
+            columnas_tabla = [
+                {"key": "cliente", "label": "Cliente"},
+                {"key": "ci", "label": "CI / NIT"},
+                {"key": "total_compras", "label": "Nro. Compras"},
+                {"key": "monto_gastado", "label": "Total Gastado (Bs)"},
+                {"key": "estado", "label": "Fidelización"}
+            ]
+
+            resumen = f"Padrón de Clientes: Se consultaron {len(clientes_db)} cuentas registradas. El volumen acumulado de compras refleja fidelización positiva en el ecosistema."
+
+            return ReporteVozResponse(
+                comando_reconocido=comando,
+                intencion_detectada="CLIENTES_Y_FIDELIZACION",
+                resumen_ejecutivo=resumen,
+                metricas_kpi={
+                    "clientes_consultados": len(clientes_db),
+                    "clientes_con_beneficio": sum(1 for m in montos if m >= 100)
+                },
+                datos_grafico=DatosGrafico(
+                    tipo_grafico="bar",
+                    labels=labels[:6],
+                    series=[{"name": "Gasto Acumulado (Bs)", "data": montos[:6]}]
+                ),
+                datos_tabla=datos_tabla,
+                columnas_tabla=columnas_tabla,
+                sugerencias_siguientes_comandos=[
+                    "Ventas por sucursal",
+                    "Resumen general del negocio"
+                ]
+            )
 
     # -------------------------------------------------------------
     # CASO 6: RESUMEN GENERAL / DASHBOARD GERENCIAL

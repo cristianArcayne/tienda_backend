@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from models.reserva import Reserva, DetalleReserva
-from models.seguridad_persona import Cliente, Persona
+from models.seguridad_persona import Cliente, Persona, Usuario
 from models.catalogo import VariantePrenda, Ropa
 from models.sucursal import Sucursal, InventarioSucursal
 from schemas.reserva import ReservaCreate, ReservaResponse, DetalleReservaResponse
@@ -73,41 +73,51 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
     if not sucursal:
         raise HTTPException(status_code=404, detail="Sucursal no encontrada.")
 
-    cliente_ci = str(reserva_in.cliente_id).strip() if reserva_in.cliente_id else "2001"
+    cliente_ci = str(reserva_in.cliente_id).strip() if reserva_in.cliente_id else "admin"
+
+    # Buscar primero si el cliente ya existe con ese código directamente (ej: 'admin', '2001')
     cliente = db.query(Cliente).filter(Cliente.ci == cliente_ci).first()
+
+    if not cliente:
+        # Buscar usuario correspondiente
+        u = db.query(Usuario).filter(Usuario.nombre_usuario == cliente_ci).first()
+        if not u and cliente_ci.isdigit():
+            u = db.query(Usuario).filter(Usuario.id == int(cliente_ci)).first()
+
+        if u and u.persona_ci:
+            cliente = db.query(Cliente).filter(Cliente.ci == u.persona_ci).first()
+            if not cliente:
+                # Si la persona existe pero falta en la tabla clientes, enlazarla
+                persona = db.query(Persona).filter(Persona.ci == u.persona_ci).first()
+                if persona:
+                    from sqlalchemy import text
+                    db.execute(text("INSERT INTO clientes (ci) VALUES (:ci) ON CONFLICT DO NOTHING"), {"ci": persona.ci})
+                    db.commit()
+                    cliente = db.query(Cliente).filter(Cliente.ci == persona.ci).first()
 
     if not cliente:
         persona = db.query(Persona).filter(Persona.ci == cliente_ci).first()
         if persona:
-            # Si existe como Persona/Empleado pero no como Cliente en la jerarquía polimórfica
+            from sqlalchemy import text
+            db.execute(text("INSERT INTO clientes (ci) VALUES (:ci) ON CONFLICT DO NOTHING"), {"ci": persona.ci})
+            db.commit()
+            cliente = db.query(Cliente).filter(Cliente.ci == persona.ci).first()
+
+    if not cliente:
+        primer_cli = db.query(Cliente).first()
+        if primer_cli and cliente_ci in ["default", "guest", "null", "undefined", ""]:
+            cliente = primer_cli
+        else:
             cliente = Cliente(
-                ci=persona.ci,
-                nombre=persona.nombre,
-                apellido_pat=persona.apellido_pat,
-                apellido_mat=persona.apellido_mat,
-                correo=persona.correo,
-                telefono=persona.telefono,
+                ci=cliente_ci,
+                nombre=cliente_ci.capitalize(),
+                apellido_pat="Web",
+                correo=f"cliente_{cliente_ci}@fashionstore.com",
+                telefono="+591 70000000",
                 tipo_persona="CLIENTE"
             )
             db.add(cliente)
             db.flush()
-        else:
-            # Registrar nuevo cliente digital en la base de datos
-            primer_cli = db.query(Cliente).first()
-            if primer_cli and cliente_ci in ["1029384", "default", "guest", "null", "undefined"]:
-                cliente = primer_cli
-                cliente_ci = primer_cli.ci
-            else:
-                cliente = Cliente(
-                    ci=cliente_ci,
-                    nombre="Cliente",
-                    apellido_pat="Web",
-                    correo=f"cliente_{cliente_ci}@fashionstore.com",
-                    telefono="+591 70000000",
-                    tipo_persona="CLIENTE"
-                )
-                db.add(cliente)
-                db.flush()
 
     # 2. Validar existencias y congelar stock
     for item in reserva_in.detalles:
@@ -133,7 +143,7 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
         inv.stock_reservado += item.cantidad
 
     # 3. Crear Reserva
-    ahora = datetime.utcnow()
+    ahora = datetime.now()
     nueva_reserva = Reserva(
         fecha=ahora,
         fecha_limite=ahora + timedelta(hours=48),
@@ -173,9 +183,12 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
     "/{reserva_id}/confirmar-retiro",
     response_model=ReservaResponse,
     summary="Confirmar retiro presencial y pago en mostrador",
-    description="Actualiza el inventario físico liberando el stock reservado y marcando la reserva como COMPLETADA."
+    description="Actualiza el inventario físico liberando el stock reservado, genera la venta presencial POS y marca la reserva como COMPLETADA."
 )
 def confirmar_retiro(reserva_id: int, db: Session = Depends(get_db)):
+    import uuid
+    from models.venta import Venta, DetalleVenta, Factura
+
     reserva = db.query(Reserva).options(
         joinedload(Reserva.detalles),
         joinedload(Reserva.sucursal),
@@ -196,10 +209,62 @@ def confirmar_retiro(reserva_id: int, db: Session = Depends(get_db)):
         ).with_for_update().first()
 
         if inv:
-            inv.stock_fisico -= item.cantidad
-            inv.stock_reservado -= item.cantidad
+            inv.stock_fisico = max(0, inv.stock_fisico - item.cantidad)
+            inv.stock_reservado = max(0, inv.stock_reservado - item.cantidad)
 
     reserva.estado = "COMPLETADA"
+
+    # Generar venta presencial POS y factura
+    total_venta = sum(float(d.precio_unitario) * d.cantidad for d in reserva.detalles)
+    cod_trx = f"TRX-W2S-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    nueva_venta = Venta(
+        fecha=datetime.now(),
+        total=total_venta,
+        descuento_total=0.0,
+        monto_neto=total_venta,
+        monto_recibido=total_venta,
+        cambio_devuelto=0.0,
+        codigo_transaccion=cod_trx,
+        estado_pago="COMPLETADA",
+        empleado_ci="1001",
+        cliente_id=reserva.cliente_id,
+        sucursal_id=reserva.sucursal_id,
+        metodo_pago_id=1,  # Mostrador
+        tipo_venta_id=1    # Presencial POS
+    )
+    db.add(nueva_venta)
+    db.flush()
+
+    for det in reserva.detalles:
+        dv = DetalleVenta(
+            venta_id=nueva_venta.id,
+            variante_id=det.variante_id,
+            cantidad=det.cantidad,
+            precio_unitario=det.precio_unitario,
+            subtotal=float(det.precio_unitario) * det.cantidad
+        )
+        db.add(dv)
+
+    nro_fac = f"FAC-{datetime.now().strftime('%Y')}-{uuid.uuid4().hex[:6].upper()}"
+    nro_aut = f"AUT-{datetime.now().strftime('%Y%m')}-{uuid.uuid4().hex[:8].upper()}"
+    cod_ctrl = f"{uuid.uuid4().hex[:2].upper()}-{uuid.uuid4().hex[2:4].upper()}-{uuid.uuid4().hex[4:6].upper()}"
+
+    fact = Factura(
+        nro_factura=nro_fac,
+        nro_autorizacion=nro_aut,
+        nit_emisor="1029384025",
+        razon_social_emisor="FashionStore Bolivia S.R.L.",
+        nit_cliente=reserva.cliente.ci if reserva.cliente else "0",
+        razon_social=f"{reserva.cliente.nombre} {reserva.cliente.apellido_pat}".strip() if reserva.cliente else "Consumidor Final",
+        codigo_control=cod_ctrl,
+        fecha_emision=datetime.now(),
+        fec_limite_emision=datetime.now() + timedelta(days=180),
+        total_literal=f"{total_venta:.2f} BOLIVIANOS",
+        estado="VALIDA",
+        venta_id=nueva_venta.id
+    )
+    db.add(fact)
+
     db.commit()
     db.refresh(reserva)
 
@@ -207,46 +272,45 @@ def confirmar_retiro(reserva_id: int, db: Session = Depends(get_db)):
 
 
 @router.post(
-    "/expirar-vencidas",
-    summary="Expirar automáticamente reservas Web-to-Store mayores a 48 horas",
-    description="Barre todas las reservas en estado PENDIENTE que hayan superado las 48 horas, las marca como EXPIRADA y devuelve el stock reservado a disponible."
+    "/expirar-antiguas",
+    summary="Expirar reservas mayores a 48 horas y liberar stock"
 )
 def expirar_reservas_vencidas(db: Session = Depends(get_db)):
-    reservas_pendientes = db.query(Reserva).options(
-        joinedload(Reserva.detalles)
-    ).filter(Reserva.estado == "PENDIENTE").all()
-
-    expiradas_count = 0
-    stock_liberado_total = 0
-
-    for r in reservas_pendientes:
-        # Si la reserva tiene más de 2 días de antigüedad (o simulación manual de vencimiento)
-        # Marcamos como expirada y liberamos stock
+    ahora = datetime.now()
+    vencidas = db.query(Reserva).filter(
+        Reserva.estado == "PENDIENTE",
+        Reserva.fecha_limite <= ahora
+    ).all()
+    
+    total_unidades = 0
+    for r in vencidas:
+        r.estado = "EXPIRADA"
         for det in r.detalles:
             inv = db.query(InventarioSucursal).filter(
                 InventarioSucursal.sucursal_id == r.sucursal_id,
                 InventarioSucursal.variante_id == det.variante_id
             ).first()
             if inv:
-                inv.stock_reservado = max(inv.stock_reservado - det.cantidad, 0)
-                stock_liberado_total += det.cantidad
-
-        r.estado = "EXPIRADA"
-        expiradas_count += 1
-
+                inv.stock_reservado = max(0, inv.stock_reservado - det.cantidad)
+                total_unidades += det.cantidad
+                
     db.commit()
     return {
-        "mensaje": "Proceso de expiración de reservas Web-to-Store (48h) ejecutado exitosamente.",
-        "reservas_expiradas": expiradas_count,
-        "unidades_stock_liberadas": stock_liberado_total
+        "mensaje": "Barrido de expiración completado",
+        "reservas_expiradas": len(vencidas),
+        "unidades_stock_liberadas": total_unidades
     }
 
 
 @router.post(
     "/{reserva_id}/cancelar",
     response_model=ReservaResponse,
-    summary="Cancelar reserva Web-to-Store y liberar stock reservado",
-    description="Permite al cliente o administrador anular un apartado antes de su retiro presencial."
+    summary="Cancelar reserva Web-to-Store y liberar stock reservado"
+)
+@router.put(
+    "/{reserva_id}/cancelar",
+    response_model=ReservaResponse,
+    include_in_schema=False
 )
 def cancelar_reserva(reserva_id: int, db: Session = Depends(get_db)):
     reserva = db.query(Reserva).options(
@@ -258,7 +322,7 @@ def cancelar_reserva(reserva_id: int, db: Session = Depends(get_db)):
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada.")
 
-    if reserva.estado != "PENDIENTE":
+    if reserva.estado not in ["PENDIENTE", "EXPIRADA"]:
         raise HTTPException(status_code=400, detail=f"No se puede cancelar una reserva en estado '{reserva.estado}'.")
 
     # Liberar stock reservado
@@ -291,7 +355,11 @@ def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(
         joinedload(Reserva.cliente)
     )
     if cliente_ci:
-        query = query.filter(Reserva.cliente_id == cliente_ci)
+        u = db.query(Usuario).filter(Usuario.nombre_usuario == cliente_ci).first()
+        if not u and cliente_ci.isdigit():
+            u = db.query(Usuario).filter(Usuario.id == int(cliente_ci)).first()
+        ci_target = u.persona_ci if (u and u.persona_ci) else cliente_ci
+        query = query.filter((Reserva.cliente_id == ci_target) | (Reserva.cliente_id == cliente_ci))
     reservas = query.order_by(Reserva.id.desc()).all()
     return [_formatear_reserva(r) for r in reservas]
 
@@ -353,7 +421,7 @@ for r in [router_compat]:
     r.add_api_route(
         "/{reserva_id}/cancelar",
         cancelar_reserva,
-        methods=["POST"],
+        methods=["POST", "PUT"],
         response_model=ReservaResponse,
         summary="Cancelar reserva Web-to-Store"
     )
@@ -362,6 +430,13 @@ for r in [router_compat]:
         expirar_reservas_vencidas,
         methods=["POST"],
         summary="Expirar reservas mayores a 48h"
+    )
+    r.add_api_route(
+        "/{reserva_id}/confirmar-retiro",
+        confirmar_retiro,
+        methods=["POST", "PUT"],
+        response_model=ReservaResponse,
+        summary="Confirmar retiro presencial y pago en mostrador"
     )
 
 

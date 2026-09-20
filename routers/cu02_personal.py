@@ -38,7 +38,7 @@ def rol_to_dict(r: Rol) -> dict:
         "nombre": r.nombre,
         "descripcion": r.descripcion or "",
         "activo": r.activo,
-        "permisos": [{"id": p.id, "nombre": p.nombre, "codename": p.codename} for p in permisos],
+        "permisos": [{"id": p.id, "nombre": p.nombre, "name": p.nombre, "codename": p.codename} for p in permisos],
         "permisos_ids": [p.id for p in permisos],
     }
 
@@ -146,13 +146,17 @@ def crear_usuario(body: dict, request: Request, db: Session = Depends(get_db)):
     return usuario_to_dict(nuevo_usuario)
 
 @router.put("/api/usuarios/{usuario_id}")
+@router.put("/api/usuarios/{usuario_id}/")
+@router.put("/api/v1/usuarios/{usuario_id}")
+@router.put("/api/v1/usuarios/{usuario_id}/")
 def actualizar_usuario(usuario_id: int, body: dict, request: Request, db: Session = Depends(get_db)):
     usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    if body.get("grupo_id"):
-        rol = db.query(Rol).filter(Rol.id == body["grupo_id"]).first()
+    rol_id_target = body.get("grupo_id") or body.get("rol_id")
+    if rol_id_target:
+        rol = db.query(Rol).filter(Rol.id == rol_id_target).first()
         if not rol:
             raise HTTPException(status_code=400, detail="El rol no existe")
         usuario.rol_id = rol.id
@@ -170,6 +174,18 @@ def actualizar_usuario(usuario_id: int, body: dict, request: Request, db: Sessio
             usuario.persona.nombre = body["nombre"]
         if body.get("apellido"):
             usuario.persona.apellido_pat = body["apellido"]
+    else:
+        if body.get("email") or body.get("nombre"):
+            fake_ci = str(uuid.uuid4().int)[:8]
+            nueva_p = Persona(
+                ci=fake_ci,
+                nombre=body.get("nombre", usuario.nombre_usuario),
+                apellido_pat=body.get("apellido", ""),
+                correo=body.get("email") or f"{usuario.nombre_usuario}@fashionstore.bo"
+            )
+            db.add(nueva_p)
+            db.flush()
+            usuario.persona_ci = nueva_p.ci
 
     db.commit()
     db.refresh(usuario)
@@ -179,12 +195,21 @@ def actualizar_usuario(usuario_id: int, body: dict, request: Request, db: Sessio
     return usuario_to_dict(usuario)
 
 @router.delete("/api/usuarios/{usuario_id}", status_code=204)
+@router.delete("/api/usuarios/{usuario_id}/", status_code=204)
+@router.delete("/api/v1/usuarios/{usuario_id}", status_code=204)
+@router.delete("/api/v1/usuarios/{usuario_id}/", status_code=204)
 def eliminar_usuario(usuario_id: int, request: Request, db: Session = Depends(get_db)):
     usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if usuario.nombre_usuario.lower() == "admin" or usuario.id == 1:
+        raise HTTPException(status_code=400, detail="No se puede eliminar el usuario administrador principal")
+    
     nombre_usu = usuario.nombre_usuario
+    persona = usuario.persona
     db.delete(usuario)
+    if persona:
+        db.delete(persona)
     db.commit()
     
     registrar_bitacora(db, "DELETE", "usuarios", str(usuario_id), f"Usuario eliminado: {nombre_usu}", request=request)
@@ -194,7 +219,9 @@ def eliminar_usuario(usuario_id: int, request: Request, db: Session = Depends(ge
 # === ROLES ===
 
 @router.get("/api/roles/permisos_disponibles")
+@router.get("/api/roles/permisos_disponibles/")
 @router.get("/api/v1/roles/permisos_disponibles")
+@router.get("/api/v1/roles/permisos_disponibles/")
 def permisos_disponibles(db: Session = Depends(get_db)):
     """Retorna todos los permisos disponibles del sistema para asignar a roles."""
     permisos = db.query(Permiso).order_by(Permiso.codename).all()

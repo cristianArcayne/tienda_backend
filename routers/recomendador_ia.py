@@ -272,76 +272,181 @@ def registrar_feedback(feedback_in: FeedbackRecomendacionRequest, db: Session = 
     summary="Chatbot Personal Shopper",
     description="Recibe un mensaje de texto natural, lo analiza y retorna una respuesta conversacional junto a una recomendación de outfit si corresponde."
 )
+@router.post(
+    "/chat-shopper",
+    response_model=ChatMessageResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False
+)
+@compat_router.post(
+    "/chat",
+    response_model=ChatMessageResponse,
+    include_in_schema=False
+)
+@compat_router.post(
+    "/chat-shopper",
+    response_model=ChatMessageResponse,
+    include_in_schema=False
+)
 def chat_personal_shopper(chat_req: ChatMessageRequest, db: Session = Depends(get_db)):
-    msj = chat_req.mensaje.lower()
-    
-    # 1. Intent: OFERTAS (promociones y descuentos)
-    if any(k in msj for k in ["oferta", "descuento", "promo", "rebaja"]):
+    msj = chat_req.mensaje.lower().strip()
+    import os
+    import json
+    import urllib.request
+    from datetime import date
+    from models.sucursal import Sucursal, InventarioSucursal
+
+    # 1. INTENCIÓN: SUCURSALES / TIENDAS FÍSICAS (¿Cuántas hay, dónde quedan, direcciones?)
+    if any(k in msj for k in ["sucursal", "sucursales", "tienda", "tiendas", "donde queda", "dónde queda", "donde estan", "dónde están", "direccion", "dirección", "ubicacion", "ubicación", "calacoto", "equipetrol", "ventura"]):
+        sucs = db.query(Sucursal).all()
+        respuesta = f"¡Hola! FashionStore cuenta actualmente con **{len(sucs)} sucursales físicas** en la ciudad de Santa Cruz para atenderte:\n\n"
+        for idx, s in enumerate(sucs, start=1):
+            respuesta += f"{idx}. **{s.nombre}**: {s.direccion or 'Av. Principal'} ({s.ciudad or 'Santa Cruz'}) • Tel: {s.telefono or '3-334455'}\n"
+        respuesta += "\nTodas nuestras tiendas atienden de lunes a domingo, cuentan con probadores/vestidores y están habilitadas para el retiro de reservas Web-to-Store."
+        return ChatMessageResponse(respuesta_texto=respuesta, outfit_recomendado=None)
+
+    # 2. INTENCIÓN: STOCK / DISPONIBILIDAD DE PRENDAS
+    elif any(k in msj for k in ["stock", "cuanto hay", "cuánto hay", "tienen disponible", "disponibilidad", "cuantas unidades", "cuántas unidades", "tienen la", "tienen el"]):
+        prendas = db.query(Ropa).all()
+        best_prenda = None
+        best_score = 0
+        for p in prendas:
+            p_name = p.nombre.lower()
+            score = 0
+            if p_name in msj:
+                score += 100
+            for w in p_name.split():
+                if len(w) >= 3 and w in msj:
+                    score += 15
+            if score > best_score:
+                best_score = score
+                best_prenda = p
+        
+        if best_prenda and best_score >= 15:
+            invs = db.query(InventarioSucursal).options(joinedload(InventarioSucursal.sucursal))\
+                     .join(VariantePrenda, InventarioSucursal.variante_id == VariantePrenda.id)\
+                     .filter(VariantePrenda.ropa_id == best_prenda.id).all()
+            
+            suc_stocks = {}
+            for i in invs:
+                suc_nom = i.sucursal.nombre if i.sucursal else "Sucursal Central"
+                suc_stocks[suc_nom] = suc_stocks.get(suc_nom, 0) + i.stock_disponible
+
+            tot_disp = sum(suc_stocks.values())
+            respuesta = f"Para la prenda **{best_prenda.nombre}** (Precio: Bs. {float(best_prenda.precio):.2f}) disponemos de **{tot_disp} unidades en total** distribuidas en nuestras tiendas:\n\n"
+            for suc_nom, cant in suc_stocks.items():
+                respuesta += f"📍 **{suc_nom}**: {cant} unidades disponibles\n"
+            respuesta += "\nPuedes visitarnos en cualquiera de estas sucursales o reservar la prenda en la tienda online para retiro inmediato."
+        else:
+            respuesta = "Contamos con excelente disponibilidad de stock en poleras, chaquetas denim, vestidos y pantalones en nuestras 3 sucursales físicas (Central, Equipetrol y Ventura Mall). ¿De qué prenda en particular te gustaría consultar existencias?"
+        return ChatMessageResponse(respuesta_texto=respuesta, outfit_recomendado=None)
+
+    # 3. INTENCIÓN: OFERTAS, DESCUENTOS Y PROMOCIONES
+    elif any(k in msj for k in ["oferta", "descuento", "promo", "rebaja", "promocion", "promociones", "beneficio"]):
         from models.catalogo import Promocion
-        import datetime
-        hoy = datetime.date.today()
+        hoy = date.today()
         promos = db.query(Promocion).filter(Promocion.fecha_inicio <= hoy, Promocion.fecha_fin >= hoy).all()
         if promos:
-            respuesta_texto = "¡Actualmente tenemos estas promociones activas!\n"
+            respuesta = "¡Actualmente tenemos las siguientes promociones comerciales activas en FashionStore!\n\n"
             for p in promos:
-                respuesta_texto += f"- **{p.nombre}**: {p.porcentaje_descuento}% de descuento.\n"
-            respuesta_texto += "¿Te gustaría ver prendas con descuento?"
+                respuesta += f"🔥 **{p.nombre}**: {p.porcentaje_descuento}% de descuento (Vigente hasta el {p.fecha_fin.strftime('%d/%m/%Y')}).\n"
+            respuesta += "\nAdemás, si acumulas compras superiores a Bs. 150 en tu cuenta de cliente, recibes un beneficio directo de Bs. 20 en tu próxima compra."
         else:
-            respuesta_texto = "Por el momento no tenemos promociones activas, pero ¡nuestros precios de temporada son excelentes! ¿Buscabas algo en particular?"
-        return ChatMessageResponse(respuesta_texto=respuesta_texto, outfit_recomendado=None)
+            respuesta = "Actualmente no tenemos campañas promocionales temporales activas, pero todas nuestras colecciones cuentan con precios accesibles de temporada y acumulación de puntos de fidelización."
+        return ChatMessageResponse(respuesta_texto=respuesta, outfit_recomendado=None)
 
-    # 2. Intent: PRECIOS
-    elif any(k in msj for k in ["precio", "cuesta", "vale"]):
-        ropa_ejemplo = db.query(Ropa).filter(Ropa.activo == True).limit(3).all()
-        if not ropa_ejemplo:
-            ropa_ejemplo = db.query(Ropa).limit(3).all()
-        if ropa_ejemplo:
-            respuesta_texto = "Nuestros precios varían según la prenda. Por ejemplo:\n"
-            for r in ropa_ejemplo:
-                respuesta_texto += f"- {r.nombre}: Bs. {float(r.precio):.2f}\n"
+    # 4. INTENCIÓN: PRECIOS Y VALORES
+    elif any(k in msj for k in ["precio", "cuesta", "vale", "costo", "tarifa"]):
+        prendas = db.query(Ropa).filter(Ropa.activo == True).all()
+        best_prenda = None
+        best_score = 0
+        for p in prendas:
+            p_name = p.nombre.lower()
+            score = 0
+            if p_name in msj:
+                score += 100
+            for w in p_name.split():
+                if len(w) >= 3 and w in msj:
+                    score += 15
+            if score > best_score:
+                best_score = score
+                best_prenda = p
+
+        if best_prenda and best_score >= 15:
+            respuesta = f"La prenda **{best_prenda.nombre}** tiene un precio oficial de **Bs. {float(best_prenda.precio):.2f}**. Se encuentra disponible para compra en tienda y reserva web."
         else:
-            respuesta_texto = "Actualmente no tenemos precios registrados en el catálogo."
-        return ChatMessageResponse(respuesta_texto=respuesta_texto, outfit_recomendado=None)
-        
-    # 3. Intent: INVENTARIO / CATALOGO
-    elif any(k in msj for k in ["ropa hay", "que venden", "catalogo", "productos", "inventario"]):
+            ejemplos = db.query(Ropa).filter(Ropa.activo == True).limit(4).all()
+            respuesta = "Nuestros precios son transparentes en moneda nacional (Bs.). Algunos precios destacados de colección:\n\n"
+            for r in ejemplos:
+                respuesta += f"- **{r.nombre}**: Bs. {float(r.precio):.2f}\n"
+        return ChatMessageResponse(respuesta_texto=respuesta, outfit_recomendado=None)
+
+    # 5. INTENCIÓN: CATÁLOGO / PRENDAS / QUÉ VENDEN
+    elif any(k in msj for k in ["ropa hay", "que venden", "qué venden", "catalogo", "catálogo", "productos", "prendas tienen"]):
         categorias = db.query(Categoria).all()
-        if categorias:
-            nombres_cat = ", ".join([c.nombre for c in categorias])
-            respuesta_texto = f"¡Tenemos una gran variedad de prendas! Contamos con las siguientes categorías: **{nombres_cat}**. ¿Qué estilo o prenda estás buscando?"
-        else:
-            respuesta_texto = "Tenemos mucha ropa de temporada, pantalones, vestidos y poleras. ¿Buscas algo para alguna ocasión especial?"
-        return ChatMessageResponse(respuesta_texto=respuesta_texto, outfit_recomendado=None)
+        cats_txt = ", ".join([f"**{c.nombre}**" for c in categorias]) if categorias else "**Casual**, **Denim**, **Formal**"
+        respuesta = f"En FashionStore somos una tienda de moda omnicanal con colecciones completas en las categorías: {cats_txt}.\n\nContamos con probador virtual 3D AR, reservas en línea y catálogo web interactivo. ¿Te interesa alguna categoría en específico?"
+        return ChatMessageResponse(respuesta_texto=respuesta, outfit_recomendado=None)
 
-    # 4. Intent Default: Generación de Outfit (Asesoría de Imagen Inteligente)
-    ocasion_detectada = "Casual"
-    if any(k in msj for k in ["boda", "bautizo", "elegante", "gala", "fiesta", "formal", "noche"]):
-        ocasion_detectada = "Formal"
-    elif any(k in msj for k in ["gym", "deporte", "ejercicio", "correr", "entrenar", "fitness"]):
-        ocasion_detectada = "Deportivo"
-    elif any(k in msj for k in ["trabajo", "oficina", "reunión", "entrevista", "ejecutivo"]):
-        ocasion_detectada = "Trabajo"
-        
-    respuesta_texto = (
-        f"¡Hola! Claro que sí, he analizado tus preferencias para una ocasión **{ocasion_detectada}**. "
-        "Basado en nuestro catálogo y armonía de color, te sugiero esta combinación con 10% de descuento:"
-    )
-    
-    req_outfit = GenerarOutfitRequest(
-        cliente_id=chat_req.cliente_id,
-        ocasion=ocasion_detectada
-    )
-    
-    try:
-        outfit = generar_outfit(req_outfit, db)
-    except Exception:
-        outfit = None
-        respuesta_texto = "¡Hola! Me encantaría ayudarte, pero parece que de momento no tenemos prendas suficientes en el catálogo para armar un conjunto completo."
+    # 6. INTENCIÓN: ASESORÍA DE ESTILO / RECOMENDACIÓN DE OUTFIT (Sin botón de compra forzado)
+    elif any(k in msj for k in ["recomiend", "recomiénd", "que me pongo", "qué me pongo", "combinar", "outfit", "estilo", "boda", "fiesta", "gala", "casual", "deporte", "gym", "trabajo"]):
+        ocasion = "Casual"
+        if any(k in msj for k in ["boda", "gala", "elegante", "formal", "noche"]):
+            ocasion = "Formal / Gala"
+        elif any(k in msj for k in ["gym", "deporte", "fitness", "entrenar"]):
+            ocasion = "Deportivo"
+        elif any(k in msj for k in ["trabajo", "oficina", "reunión", "entrevista"]):
+            ocasion = "Trabajo / Oficina"
+        elif any(k in msj for k in ["fiesta", "cumpleaños", "evento"]):
+            ocasion = "Fiesta / Noche"
 
-    return ChatMessageResponse(
-        respuesta_texto=respuesta_texto,
-        outfit_recomendado=outfit
+        prendas = db.query(Ropa).filter(Ropa.activo == True).limit(5).all()
+        nombres_sugeridos = [p.nombre for p in prendas[:3]] if prendas else ["Chaqueta Denim Vintage", "Polera Oversize", "Pantalón Casual"]
+        respuesta = (
+            f"Para una ocasión **{ocasion}**, te recomiendo un look equilibrado y cómodo:\n\n"
+            f"✨ **Prenda principal sugerida**: {nombres_sugeridos[0] if len(nombres_sugeridos) > 0 else 'Polera Casual'}\n"
+            f"✨ **Combinación armónica**: Acompáñala con {nombres_sugeridos[1] if len(nombres_sugeridos) > 1 else 'Pantalón clásico'} y calzado a tono.\n\n"
+            "Puedes usar también nuestro 'Generador de Outfits' en la pestaña superior para ver la afinidad de color y combinaciones 3D."
+        )
+        return ChatMessageResponse(respuesta_texto=respuesta, outfit_recomendado=None)
+
+    # 7. LLM GEMINI FALLBACK (Con contexto comercial completo)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        try:
+            sucs = db.query(Sucursal).all()
+            sucs_info = "; ".join([f"{s.nombre} en {s.ciudad or 'Santa Cruz'} ({s.direccion or ''}, tel {s.telefono or ''})" for s in sucs])
+            prendas_sample = db.query(Ropa).filter(Ropa.activo == True).limit(6).all()
+            prendas_info = ", ".join([f"{p.nombre} (Bs. {float(p.precio):.2f})" for p in prendas_sample])
+
+            prompt_gemini = f"""
+            Eres el Asistente Inteligente oficial y Personal Shopper de FashionStore, una tienda de moda en Santa Cruz, Bolivia.
+            Responde cordialmente en español, de forma breve, precisa y natural (1 a 2 párrafos).
+            Información real de FashionStore:
+            - Sucursales ({len(sucs)}): {sucs_info}
+            - Catálogo destacado: {prendas_info}
+            - Políticas: Todas las sucursales atienden de lunes a domingo. Tenemos probadores virtuales 3D y reservas Web-to-Store.
+            - Moneda: Bolivianos (Bs.).
+            Pregunta del cliente: "{chat_req.mensaje}"
+            """
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
+            payload = json.dumps({"contents": [{"parts": [{"text": prompt_gemini}]}]}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                data_resp = json.loads(resp.read().decode("utf-8"))
+                texto_gemini = data_resp["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if texto_gemini:
+                    return ChatMessageResponse(respuesta_texto=texto_gemini, outfit_recomendado=None)
+        except Exception:
+            pass
+
+    # 8. RESPUESTA GENERAL DE CORTESÍA
+    respuesta_default = (
+        "¡Hola! Soy tu Asistente Virtual de FashionStore. Puedo informarte sobre nuestras 3 sucursales en Santa Cruz, "
+        "consultar existencias de stock de cualquier prenda, verificar precios y promociones activas, o darte consejos de estilo para cualquier ocasión. "
+        "¿En qué te puedo ayudar hoy?"
     )
+    return ChatMessageResponse(respuesta_texto=respuesta_default, outfit_recomendado=None)
 
 
 @router.get(

@@ -195,11 +195,26 @@ def _ejecutar_venta_pos_core(
 
         disponible = inv.stock_disponible if inv else 0
         if not inv or disponible < item.cantidad:
-            canal = "Digital / E-commerce" if es_digital else "Mostrador POS"
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Excepción A1 (Stock Insuficiente en {canal}): Solicitadas {item.cantidad} unidades de {var.ropa.nombre if var.ropa else 'Prenda'}, disponibles: {disponible}."
-            )
+            if es_digital:
+                # Enrutamiento omnicanal: despachar desde la sucursal con inventario disponible
+                inv_alt = db.query(InventarioSucursal).filter(
+                    InventarioSucursal.variante_id == item.variante_id,
+                    (InventarioSucursal.stock_fisico - InventarioSucursal.stock_reservado) >= item.cantidad
+                ).order_by((InventarioSucursal.stock_fisico - InventarioSucursal.stock_reservado).desc()).with_for_update().first()
+                if inv_alt:
+                    inv = inv_alt
+                    disponible = inv.stock_disponible
+                    sucursal_id = inv.sucursal_id
+
+            if not inv or disponible < item.cantidad:
+                canal = "Digital / E-commerce" if es_digital else "Mostrador POS"
+                total_cadena = sum(
+                    i.stock_disponible for i in db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == item.variante_id).all()
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Excepción A1 (Stock Insuficiente en {canal}): Solicitadas {item.cantidad} unidades de {var.ropa.nombre if var.ropa else 'Prenda'}, disponibles: {disponible} (Total cadena: {total_cadena})."
+                )
 
         # DESCARGO FÍSICO INMEDIATO DE ALMACÉN
         inv.stock_fisico -= item.cantidad
@@ -373,6 +388,21 @@ def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depen
             detail="El carrito de compras se encuentra vacío."
         )
 
+    # Excepción A1: Simulación de fallo de pasarela externa
+    if venta_in.token_pasarela and ("rechazad" in venta_in.token_pasarela.lower() or "fallid" in venta_in.token_pasarela.lower()):
+        for d in carrito.detalles:
+            inv = db.query(InventarioSucursal).filter(
+                InventarioSucursal.sucursal_id == venta_in.sucursal_id,
+                InventarioSucursal.variante_id == d.variante_id
+            ).first()
+            if inv:
+                inv.stock_reservado = max(0, inv.stock_reservado - d.cantidad)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Pago rechazado por la pasarela de pagos externa (fondos insuficientes o tarjeta inválida)."
+        )
+
     items_create = [
         ItemVentaCreate(
             variante_id=d.variante_id,
@@ -395,6 +425,16 @@ def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depen
         descuento_total=0.0,
         tipo_venta_id=tipo_venta_id
     )
+
+    # Liberar stock reservado al concretarse la venta
+    for itm in items_create:
+        inv = db.query(InventarioSucursal).filter(
+            InventarioSucursal.sucursal_id == venta.sucursal_id,
+            InventarioSucursal.variante_id == itm.variante_id
+        ).first()
+        if inv:
+            inv.stock_reservado = max(0, inv.stock_reservado - itm.cantidad)
+    db.commit()
 
     # Vaciar carrito
     db.query(DetalleCarritoCompra).filter(DetalleCarritoCompra.carrito_id == carrito.id).delete()
@@ -446,8 +486,8 @@ def listar_ventas(
         joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
     )
 
-    if sucursal_id:
-        query = query.filter(Venta.sucursal_id == sucursal_id)
+    if isinstance(sucursal_id, (int, float)) or (isinstance(sucursal_id, str) and sucursal_id.isdigit()):
+        query = query.filter(Venta.sucursal_id == int(sucursal_id))
 
     ventas = query.order_by(Venta.id.desc()).all()
     return [_formatear_venta(v) for v in ventas]
@@ -522,13 +562,29 @@ def crear_venta_compat_frontend(body: VentaFrontendCreateDto, db: Session = Depe
     tipo_id = 2 if es_digital else 1
 
     suc_id = body.sucursal_id or 1
+
+    # Determinar cliente y empleado
+    if es_digital:
+        # En venta digital E-commerce, el cliente es la cuenta compradora
+        c_raw = str(body.usuario_id or "admin")
+        target_cliente = "admin" if c_raw in ["1", "1001", "admin"] else c_raw
+        # Asegurar que exista como Cliente
+        cli_obj = db.query(Cliente).filter(Cliente.ci == target_cliente).first()
+        if not cli_obj:
+            cli_obj = db.query(Cliente).first()
+            target_cliente = cli_obj.ci if cli_obj else "admin"
+        target_empleado = "1001"
+    else:
+        target_empleado = str(body.usuario_id) if body.usuario_id else "1001"
+        target_cliente = str(body.usuario_id) if str(body.usuario_id) not in ["1001", "1002"] else None
+
     venta = _ejecutar_venta_pos_core(
         db=db,
         sucursal_id=suc_id,
         metodo_pago_id=metodo_id,
         items=items_create,
-        empleado_ci=str(body.usuario_id) if body.usuario_id else "1001",
-        cliente_ci=str(body.usuario_id) if str(body.usuario_id) not in ["1001", "1002"] else None,
+        empleado_ci=target_empleado,
+        cliente_ci=target_cliente,
         nit_cliente=body.nit_cliente,
         razon_social=body.razon_social,
         monto_recibido=body.monto_recibido,

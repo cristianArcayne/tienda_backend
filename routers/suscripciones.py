@@ -69,7 +69,14 @@ MOCK_CAMBIOS = [
 # === PLANES ===
 @router.get("/api/planes/")
 @router.get("/api/v1/planes/")
-def listar_planes():
+def listar_planes(page: Optional[int] = None, page_size: int = 10):
+    if page is not None:
+        return {
+            "count": len(MOCK_PLANES),
+            "next": None,
+            "previous": None,
+            "results": MOCK_PLANES
+        }
     return MOCK_PLANES
 
 

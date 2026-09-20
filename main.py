@@ -10,6 +10,7 @@ from routers.sucursales import router as sucursales_router, router_compat as suc
 from routers.catalogo import (
     router as catalogo_router,
     router_catalogo_compat,
+    router_catalogo_v1,
     router_productos_compat,
     router_productos_v1,
     router_productos_detalle_compat,
@@ -101,6 +102,7 @@ app.include_router(sucursales_router)
 app.include_router(sucursales_compat_router)
 app.include_router(catalogo_router)
 app.include_router(router_catalogo_compat)
+app.include_router(router_catalogo_v1)
 app.include_router(router_productos_compat)
 app.include_router(router_productos_v1)
 app.include_router(router_productos_detalle_compat)
@@ -115,12 +117,12 @@ app.include_router(traspasos_router)
 app.include_router(traspasos_compat_router)
 app.include_router(carrito_router)
 app.include_router(carrito_compat_router)
-app.include_router(ventas_router)
-app.include_router(ventas_compat_router)
 app.include_router(fidelizacion_beneficio_router)
 app.include_router(fidelizacion_beneficio_compat_router)
 app.include_router(fidelizacion_config_router)
 app.include_router(fidelizacion_config_compat_router)
+app.include_router(ventas_router)
+app.include_router(ventas_compat_router)
 app.include_router(ia_alertas_router)
 app.include_router(ia_alertas_compat_router)
 app.include_router(notificaciones_router)
