@@ -1,8 +1,12 @@
 import os
 from dotenv import load_dotenv
 
-# Cargar variables desde el archivo .env
-load_dotenv()
+# Cargar variables desde el archivo .env del directorio backend
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_path):
+    load_dotenv(_env_path)
+else:
+    load_dotenv()
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -26,6 +30,10 @@ engine = create_engine(
     connect_args=connect_args,
     pool_pre_ping=True
 )
+
+if "neon.tech" in DATABASE_URL or "postgresql" in DATABASE_URL:
+    db_host = DATABASE_URL.split("@")[-1].split("/")[0] if "@" in DATABASE_URL else "PostgreSQL"
+    print(f"[*] Base de datos activa: Neon PostgreSQL Cloud ({db_host})")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

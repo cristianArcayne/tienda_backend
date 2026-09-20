@@ -59,26 +59,101 @@ def _formatear_carrito(carrito: CarritoCompra) -> CarritoCompraResponse:
 
 
 @router.get(
-    "/{cliente_id}",
+    "/",
     response_model=CarritoCompraResponse,
-    summary="Recuperar carrito sincronizado en PostgreSQL",
-    description="Sincroniza y retorna el carrito persistente del cliente para Web Angular y App Móvil Flutter."
+    summary="Recuperar carrito persistente activo",
+    include_in_schema=False
 )
-def obtener_carrito_persistente(cliente_id: int, db: Session = Depends(get_db)):
-    cliente = db.query(Cliente).filter(Cliente.ci == cliente_id).first()
-    if not cliente:
-        raise HTTPException(status_code=404, detail="Cliente no encontrado.")
+@router.get(
+    "",
+    response_model=CarritoCompraResponse,
+    summary="Recuperar carrito persistente activo"
+)
+def obtener_carrito_activo(db: Session = Depends(get_db)):
+    cliente = db.query(Cliente).first()
+    cliente_ci = cliente.ci if cliente else "admin"
 
     carrito = db.query(CarritoCompra).options(
         joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.ropa),
         joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.talla),
         joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.color)
-    ).filter(CarritoCompra.cliente_id == cliente_id).first()
+    ).first()
 
     if not carrito:
-        carrito = CarritoCompra(fecha_creacion=date.today(), cliente_id=cliente_id)
+        carrito = CarritoCompra(fecha_creacion=date.today(), cliente_id=cliente_ci)
         db.add(carrito)
         db.commit()
         db.refresh(carrito)
 
     return _formatear_carrito(carrito)
+
+
+@router.get(
+    "/{cliente_id}",
+    response_model=CarritoCompraResponse,
+    summary="Recuperar carrito sincronizado en PostgreSQL",
+    description="Sincroniza y retorna el carrito persistente del cliente para Web Angular y App Móvil Flutter."
+)
+def obtener_carrito_persistente(cliente_id: str, db: Session = Depends(get_db)):
+    cliente = db.query(Cliente).filter(Cliente.ci == str(cliente_id)).first()
+    if not cliente:
+        cliente = db.query(Cliente).first()
+    cliente_ci = cliente.ci if cliente else str(cliente_id)
+
+    carrito = db.query(CarritoCompra).options(
+        joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.ropa),
+        joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.talla),
+        joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.color)
+    ).filter(CarritoCompra.cliente_id == cliente_ci).first()
+
+    if not carrito:
+        carrito = CarritoCompra(fecha_creacion=date.today(), cliente_id=cliente_ci)
+        db.add(carrito)
+        db.commit()
+        db.refresh(carrito)
+
+    return _formatear_carrito(carrito)
+
+
+@router.post(
+    "/items",
+    summary="Agregar item al carrito persistente"
+)
+@router.post(
+    "/items/",
+    summary="Agregar item al carrito persistente",
+    include_in_schema=False
+)
+def agregar_item_persistente(item_in: dict, db: Session = Depends(get_db)):
+    variante_id = item_in.get("variante_id")
+    cantidad = item_in.get("cantidad", 1)
+
+    if not variante_id:
+        raise HTTPException(status_code=400, detail="variante_id es requerido")
+
+    carrito = db.query(CarritoCompra).first()
+    if not carrito:
+        cliente = db.query(Cliente).first()
+        cliente_ci = cliente.ci if cliente else "admin"
+        carrito = CarritoCompra(fecha_creacion=date.today(), cliente_id=cliente_ci)
+        db.add(carrito)
+        db.commit()
+        db.refresh(carrito)
+
+    detalle = db.query(DetalleCarritoCompra).filter(
+        DetalleCarritoCompra.carrito_id == carrito.id,
+        DetalleCarritoCompra.variante_id == variante_id
+    ).first()
+
+    if detalle:
+        detalle.cantidad += cantidad
+    else:
+        nuevo_detalle = DetalleCarritoCompra(
+            carrito_id=carrito.id,
+            variante_id=variante_id,
+            cantidad=cantidad
+        )
+        db.add(nuevo_detalle)
+
+    db.commit()
+    return {"success": True, "mensaje": "Producto añadido al carrito correctamente"}

@@ -92,8 +92,9 @@ app.add_middleware(
 )
 
 # Montar carpeta de archivos estáticos (fotografías y modelos 3D .glb)
-os.makedirs(os.path.join("static", "uploads"), exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+os.makedirs(os.path.join(_static_dir, "uploads"), exist_ok=True)
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 # Inclusión de Routers modulares por Caso de Uso
 app.include_router(tallas_router)

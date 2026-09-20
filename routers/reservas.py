@@ -67,7 +67,23 @@ def _formatear_reserva(reserva: Reserva) -> ReservaResponse:
     summary="Crear reserva Web-to-Store y apartar stock en sucursal",
     description="Permite apartar digitalmente prendas para pagar y retirar en la sucursal elegida."
 )
+@router.post(
+    "/",
+    response_model=ReservaResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False
+)
+@router.post(
+    "",
+    response_model=ReservaResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False
+)
 def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
+    detalles_list = reserva_in.detalles or reserva_in.items or []
+    if not detalles_list:
+        raise HTTPException(status_code=400, detail="Debe incluir al menos un producto para la reserva.")
+
     # 1. Validar sucursal y cliente
     sucursal = db.query(Sucursal).filter(Sucursal.id == reserva_in.sucursal_id).first()
     if not sucursal:
@@ -120,7 +136,7 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
             db.flush()
 
     # 2. Validar existencias y congelar stock
-    for item in reserva_in.detalles:
+    for item in detalles_list:
         inv = db.query(InventarioSucursal).filter(
             InventarioSucursal.sucursal_id == reserva_in.sucursal_id,
             InventarioSucursal.variante_id == item.variante_id
