@@ -69,13 +69,16 @@ class VentaPOSCreate(BaseModel):
 
 
 class VentaEcommerceCreate(BaseModel):
-    cliente_id: Union[str, int] = Field(..., description="CI del cliente registrado (CU15)")
-    sucursal_id: int = Field(..., description="ID de la sucursal desde donde se despacha")
-    metodo_pago_id: int = Field(..., description="ID del método de pago (Stripe, Libélula, PayPal)")
+    cliente_id: Optional[Union[str, int]] = Field(None, description="CI del cliente registrado (CU15)")
+    sucursal_id: Optional[int] = Field(1, description="ID de la sucursal desde donde se despacha")
+    metodo_pago_id: Optional[int] = Field(3, description="ID del método de pago (Stripe, Libélula, PayPal, QR)")
+    metodo_pago: Optional[str] = "QR_SIMPLE"
     nit_cliente: Optional[str] = "0"
     razon_social: Optional[str] = "Sin Nombre"
     direccion_envio: Optional[str] = "Entrega a domicilio"
     token_pasarela: Optional[str] = "tok_simulado_aprobado"
+    items: Optional[List[ItemVentaCreate]] = None
+    notas: Optional[str] = None
 
 
 class VentaResponse(BaseModel):

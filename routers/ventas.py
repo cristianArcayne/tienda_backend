@@ -362,8 +362,9 @@ def procesar_venta_pos(venta_in: VentaPOSCreate, db: Session = Depends(get_db)):
     tags=["CU15. Procesar ventas digitales (E-commerce)"],
     summary="Procesar venta digital en E-commerce Web / Móvil"
 )
+@router.post("/ecommerce/", response_model=VentaResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depends(get_db)):
-    cliente_str = str(venta_in.cliente_id).strip()
+    cliente_str = str(venta_in.cliente_id).strip() if venta_in.cliente_id else "2001"
     cliente = db.query(Cliente).filter(Cliente.ci == cliente_str).first()
     if not cliente:
         persona = db.query(Persona).filter(Persona.ci == cliente_str).first()
@@ -372,73 +373,97 @@ def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depen
             db.add(cliente)
             db.flush()
         else:
-            raise HTTPException(status_code=404, detail="Cliente no encontrado.")
+            cliente = db.query(Cliente).first()
+            if not cliente:
+                cliente = Cliente(ci=cliente_str, nombre="Cliente", apellido_pat="Tienda", correo="cliente@fashionstore.com", tipo_persona="CLIENTE")
+                db.add(cliente)
+                db.flush()
 
     tipo_ecom = db.query(TipoVenta).filter(TipoVenta.nombre.ilike("%Digital%")).first()
     tipo_venta_id = tipo_ecom.id if tipo_ecom else 2
 
-    from models.carrito import CarritoCompra, DetalleCarritoCompra
-    carrito = db.query(CarritoCompra).options(
-        joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion)
-    ).filter(CarritoCompra.cliente_id == cliente.ci).first()
+    # Resolver método de pago
+    metodo_id = venta_in.metodo_pago_id or 1
+    if venta_in.metodo_pago:
+        m_str = venta_in.metodo_pago.lower()
+        if "qr" in m_str:
+            metodo_qr = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%QR%")).first()
+            metodo_id = metodo_qr.id if metodo_qr else 3
+        elif "efectivo" in m_str:
+            metodo_ef = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%Efectivo%")).first()
+            metodo_id = metodo_ef.id if metodo_ef else 1
+        else:
+            metodo_tj = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%Tarjeta%")).first()
+            metodo_id = metodo_tj.id if metodo_tj else 2
 
-    if not carrito or not carrito.detalles:
+    # Resolver sucursal
+    suc_id = venta_in.sucursal_id or 1
+    suc = db.query(Sucursal).filter(Sucursal.id == suc_id).first()
+    if not suc:
+        suc_first = db.query(Sucursal).first()
+        suc_id = suc_first.id if suc_first else 1
+
+    # Obtener items de venta (directos o desde carrito en base de datos)
+    items_create: List[ItemVentaCreate] = []
+    carrito = None
+
+    if venta_in.items and len(venta_in.items) > 0:
+        items_create = [
+            ItemVentaCreate(
+                variante_id=it.variante_id,
+                cantidad=it.cantidad,
+                precio_unitario=it.precio_unitario,
+                descuento=it.descuento or 0.0
+            ) for it in venta_in.items
+        ]
+    else:
+        from models.carrito import CarritoCompra, DetalleCarritoCompra
+        carrito = db.query(CarritoCompra).options(
+            joinedload(CarritoCompra.detalles).joinedload(DetalleCarritoCompra.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion)
+        ).filter(CarritoCompra.cliente_id == cliente.ci).first()
+
+        if carrito and carrito.detalles:
+            items_create = [
+                ItemVentaCreate(
+                    variante_id=d.variante_id,
+                    cantidad=d.cantidad,
+                    precio_unitario=_calcular_precio_unitario_promo(d.variante.ropa if d.variante else None, float(d.variante.precio_ajustado) if (d.variante and d.variante.precio_ajustado) else None)[2]
+                )
+                for d in carrito.detalles
+            ]
+
+    if not items_create:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El carrito de compras se encuentra vacío."
+            detail="No se encontraron prendas en el carrito para procesar el pago."
         )
 
     # Excepción A1: Simulación de fallo de pasarela externa
     if venta_in.token_pasarela and ("rechazad" in venta_in.token_pasarela.lower() or "fallid" in venta_in.token_pasarela.lower()):
-        for d in carrito.detalles:
-            inv = db.query(InventarioSucursal).filter(
-                InventarioSucursal.sucursal_id == venta_in.sucursal_id,
-                InventarioSucursal.variante_id == d.variante_id
-            ).first()
-            if inv:
-                inv.stock_reservado = max(0, inv.stock_reservado - d.cantidad)
-        db.commit()
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail="Pago rechazado por la pasarela de pagos externa (fondos insuficientes o tarjeta inválida)."
         )
 
-    items_create = [
-        ItemVentaCreate(
-            variante_id=d.variante_id,
-            cantidad=d.cantidad,
-            precio_unitario=_calcular_precio_unitario_promo(d.variante.ropa if d.variante else None, float(d.variante.precio_ajustado) if (d.variante and d.variante.precio_ajustado) else None)[2]
-        )
-        for d in carrito.detalles
-    ]
-
     venta = _ejecutar_venta_pos_core(
         db=db,
-        sucursal_id=venta_in.sucursal_id,
-        metodo_pago_id=venta_in.metodo_pago_id,
+        sucursal_id=suc_id,
+        metodo_pago_id=metodo_id,
         items=items_create,
         empleado_ci="1001",
         cliente_ci=cliente.ci,
-        nit_cliente=venta_in.nit_cliente,
+        nit_cliente=venta_in.nit_cliente or "0",
         razon_social=venta_in.razon_social or f"{cliente.nombre} {cliente.apellido_pat}",
         monto_recibido=None,
         descuento_total=0.0,
         tipo_venta_id=tipo_venta_id
     )
 
-    # Liberar stock reservado al concretarse la venta
-    for itm in items_create:
-        inv = db.query(InventarioSucursal).filter(
-            InventarioSucursal.sucursal_id == venta.sucursal_id,
-            InventarioSucursal.variante_id == itm.variante_id
-        ).first()
-        if inv:
-            inv.stock_reservado = max(0, inv.stock_reservado - itm.cantidad)
-    db.commit()
-
-    # Vaciar carrito
-    db.query(DetalleCarritoCompra).filter(DetalleCarritoCompra.carrito_id == carrito.id).delete()
-    db.commit()
+    # Vaciar carrito de base de datos si existía
+    if carrito:
+        from models.carrito import DetalleCarritoCompra
+        db.query(DetalleCarritoCompra).filter(DetalleCarritoCompra.carrito_id == carrito.id).delete()
+        db.commit()
 
     return _formatear_venta(venta)
 
