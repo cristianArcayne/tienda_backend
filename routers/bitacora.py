@@ -9,6 +9,8 @@ from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
+import pytz
+
 from database import get_db
 from models.seguridad_persona import Bitacora, Usuario
 
@@ -17,6 +19,8 @@ router = APIRouter(
     tags=["CU03. Gestionar bitácora de auditoría inmutable"]
 )
 
+# ─── Zona horaria Bolivia ─────────────────────────────────────────────────────
+TZ_BOLIVIA = pytz.timezone('America/La_Paz')
 try:
     import pytz
     TZ_BOLIVIA = pytz.timezone('America/La_Paz')
@@ -27,6 +31,10 @@ except ImportError:
     TZ_BOLIVIA = timezone(timedelta(hours=-4))
     def now_bolivia() -> datetime:
         return datetime.now(TZ_BOLIVIA)
+
+def now_bolivia() -> datetime:
+    """Hora actual en Bolivia (UTC-4)."""
+    return datetime.now(TZ_BOLIVIA)
 
 # ─── Función pública para registrar desde cualquier router ───────────────────
 def obtener_usuario_e_ip(request: Request) -> tuple[Optional[int], str]:
