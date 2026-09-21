@@ -87,13 +87,14 @@ def insertar_prendas():
             db.add(inv2)
 
         db.commit()
-        print(f" Prendas insertadas con xito en Neon DB! Polera ID: {p1.id}, Chamarra ID: {p2.id}")
+        print(f"✅ ¡Prendas insertadas con éxito en Neon DB! Polera ID: {p1.id}, Chamarra ID: {p2.id}")
 
     except Exception as e:
         db.rollback()
-        print(f" Error insertando prendas: {e}")
+        print(f"❌ Error insertando prendas: {e}")
     finally:
         db.close()
 
 if __name__ == "__main__":
     insertar_prendas()
+
