@@ -144,12 +144,13 @@ def _ejecutar_venta_pos_core(
     if not empleado:
         empleado = db.query(Empleado).first()
 
-    # 3. Validar cliente (o consumidor final)
+    # 3. Validar cliente (o consumidor final o registrar nuevo cliente al vuelo)
     cliente = None
-    if cliente_ci and cliente_ci not in ["0", "null", "undefined", "anonymous"]:
-        cliente = db.query(Cliente).filter(Cliente.ci == str(cliente_ci)).first()
+    if cliente_ci and str(cliente_ci).strip() not in ["0", "null", "undefined", "anonymous", ""]:
+        ci_clean = str(cliente_ci).strip()
+        cliente = db.query(Cliente).filter(Cliente.ci == ci_clean).first()
         if not cliente:
-            persona = db.query(Persona).filter(Persona.ci == str(cliente_ci)).first()
+            persona = db.query(Persona).filter(Persona.ci == ci_clean).first()
             if persona:
                 cliente = Cliente(
                     ci=persona.ci,
@@ -158,6 +159,21 @@ def _ejecutar_venta_pos_core(
                     apellido_mat=persona.apellido_mat,
                     correo=persona.correo,
                     telefono=persona.telefono,
+                    tipo_persona="CLIENTE"
+                )
+                db.add(cliente)
+                db.flush()
+            else:
+                # Registra nuevo cliente al vuelo en la base de datos
+                nom_disp = razon_social if (razon_social and razon_social not in ["Sin Nombre", "Consumidor Final", "0"]) else ci_clean
+                partes = nom_disp.split(" ", 1)
+                nom_cli = partes[0]
+                ape_cli = partes[1] if len(partes) > 1 else ""
+                cliente = Cliente(
+                    ci=ci_clean,
+                    nombre=nom_cli,
+                    apellido_pat=ape_cli,
+                    correo=f"cliente_{ci_clean.lower().replace(' ', '_')}@fashionstore.bo",
                     tipo_persona="CLIENTE"
                 )
                 db.add(cliente)
@@ -565,6 +581,8 @@ class VentaFrontendCreateDto(BaseModel):
     precio_total: Optional[float] = None
     descuento_total: Optional[float] = 0.0
     usuario_id: Optional[Union[str, int]] = "1001"
+    cliente_ci: Optional[str] = None
+    cliente_nombre: Optional[str] = None
     sucursal_id: Optional[int] = 1
     metodo_pago_id: Optional[int] = 1
     metodo: Optional[str] = "efectivo"
@@ -604,17 +622,18 @@ def crear_venta_compat_frontend(body: VentaFrontendCreateDto, db: Session = Depe
     # Determinar cliente y empleado
     if es_digital:
         # En venta digital E-commerce, el cliente es la cuenta compradora
-        c_raw = str(body.usuario_id or "admin")
+        c_raw = str(body.cliente_ci or body.usuario_id or "admin")
         target_cliente = "admin" if c_raw in ["1", "1001", "admin"] else c_raw
-        # Asegurar que exista como Cliente
         cli_obj = db.query(Cliente).filter(Cliente.ci == target_cliente).first()
         if not cli_obj:
             cli_obj = db.query(Cliente).first()
             target_cliente = cli_obj.ci if cli_obj else "admin"
         target_empleado = "1001"
     else:
-        target_empleado = str(body.usuario_id) if body.usuario_id else "1001"
-        target_cliente = str(body.usuario_id) if str(body.usuario_id) not in ["1001", "1002"] else None
+        target_empleado = str(body.usuario_id) if (body.usuario_id and str(body.usuario_id) in ["1001", "1002"]) else "1001"
+        target_cliente = body.cliente_ci or body.cliente_nombre or (str(body.usuario_id) if str(body.usuario_id) not in ["1001", "1002"] else None)
+
+    razon_soc = body.razon_social or body.cliente_nombre or "Consumidor Final"
 
     venta = _ejecutar_venta_pos_core(
         db=db,
@@ -623,8 +642,8 @@ def crear_venta_compat_frontend(body: VentaFrontendCreateDto, db: Session = Depe
         items=items_create,
         empleado_ci=target_empleado,
         cliente_ci=target_cliente,
-        nit_cliente=body.nit_cliente,
-        razon_social=body.razon_social,
+        nit_cliente=body.nit_cliente or target_cliente or "0",
+        razon_social=razon_soc,
         monto_recibido=body.monto_recibido,
         descuento_total=body.descuento_total or 0.0,
         tipo_venta_id=tipo_id
