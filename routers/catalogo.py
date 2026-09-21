@@ -107,7 +107,8 @@ def _normalizar_media_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
     if url.startswith("/static/"):
-        return f"http://localhost:8000{url}"
+        backend_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("BACKEND_URL") or "https://tienda-backend-kvfk.onrender.com"
+        return f"{backend_url.rstrip('/')}{url}"
     return url
 
 
