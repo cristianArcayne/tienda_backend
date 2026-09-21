@@ -520,10 +520,6 @@ def agregar_favorito(req: dict, db: Session = Depends(get_db)):
     db.refresh(nuevo_fav)
     
     return {
-        "count": 0,
-        "next": None,
-        "previous": None,
-        "results": []
         "id": nuevo_fav.id,
         "usuario": nuevo_fav.usuario_id or 1,
         "producto_id": ropa.id,
