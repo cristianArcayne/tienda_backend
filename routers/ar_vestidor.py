@@ -228,7 +228,7 @@ def _detectar_categoria_segmind(prenda) -> str:
 
 
 def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: str) -> str:
-    """Fallback inteligente para garantizar que NUNCA falle la prueba en vivo para la presentación."""
+    """Fallback inteligente y estilizado para garantizar que NUNCA falle la prueba en vivo para la presentación."""
     try:
         from PIL import Image, ImageOps, ImageEnhance, ImageFilter
         import io
@@ -259,18 +259,26 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 
         garment_img = ImageOps.exif_transpose(garment_img).convert("RGBA")
 
-        torso_w = int(u_w * 0.68)
-        torso_h = int(u_h * 0.46)
+        # Proporción exacta de la prenda al torso del usuario
+        torso_w = int(u_w * 0.64)
+        aspect_garment = garment_img.height / max(garment_img.width, 1)
+        torso_h = int(torso_w * aspect_garment)
+
+        max_h = int(u_h * 0.50)
+        if torso_h > max_h:
+            torso_h = max_h
+            torso_w = int(torso_h / aspect_garment)
+
         garment_resized = garment_img.resize((torso_w, torso_h), Image.Resampling.LANCZOS)
 
         pos_x = (u_w - torso_w) // 2
-        pos_y = int(u_h * 0.33)
+        pos_y = int(u_h * 0.29)
 
         combined = user_img.copy()
         combined.paste(garment_resized, (pos_x, pos_y), garment_resized)
 
         out_buf = io.BytesIO()
-        combined.convert("RGB").save(out_buf, format="JPEG", quality=90)
+        combined.convert("RGB").save(out_buf, format="JPEG", quality=92)
         b64_out = base64.b64encode(out_buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_out}"
 
