@@ -356,12 +356,13 @@ async def try_on_ia(
                 except Exception:
                     pass
 
-                if "No human detected" in str(error_msg):
-                    error_msg = "No se detectó una persona clara en la foto. Toma una foto con buena luz mostrando tu cuerpo o torso."
+                if "No human detected" in str(error_msg) or "Invalid Human Image" in str(error_msg):
+                    error_msg = "No se detectó una persona clara en la foto. Sube una foto con buena luz mostrando tu cuerpo o torso."
                 elif "Invalid Garment" in str(error_msg):
-                    error_msg = "La imagen de esta prenda no pudo ser procesada. Intenta con otra prenda del catálogo."
+                    error_msg = "La foto de esta prenda no es apta para la prueba de IA. Selecciona otra prenda del catálogo (ej: Polera u otra prenda clara)."
                 elif "credit" in str(error_msg).lower() or "balance" in str(error_msg).lower():
                     error_msg = "Saldo o créditos insuficientes en la cuenta de Segmind."
+
 
                 print(f"[Segmind ERROR] Status {response.status_code}: {error_msg}")
                 raise HTTPException(
