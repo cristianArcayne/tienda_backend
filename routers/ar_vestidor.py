@@ -295,11 +295,12 @@ async def try_on_ia(
         "human_img": foto_base64,
         "garm_img": garment_data_url,
         "category": category,
-        "crop": False,
+        "crop": True,
         "seed": 42,
-        "steps": 20,
+        "steps": 30,
         "garment_des": prenda.nombre or "clothing item"
     }
+
 
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
