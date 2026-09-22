@@ -573,6 +573,23 @@ def obtener_perfil(user_id: Optional[str] = None, db: Session = Depends(get_db))
 
     persona = db.query(Persona).filter(Persona.ci == usuario.persona_ci).first() if usuario.persona_ci else None
     rol_nombre = usuario.rol.nombre if usuario.rol else "Cliente"
+    es_admin = (rol_nombre.lower() in ["administrador", "admin"]) or usuario.nombre_usuario.lower() == "admin"
+
+    if es_admin:
+        permisos_lista = ["*"]
+    elif "cliente" in rol_nombre.lower():
+        permisos_lista = [
+            "catalogo.ver", "vestidor.usar", "carrito.usar",
+            "reservas.crear", "resenas.crear", "perfil.ver",
+            "COMPRAR", "LEER_CATALOGO"
+        ]
+    elif "empleado" in rol_nombre.lower() or "cajero" in rol_nombre.lower():
+        permisos_lista = [
+            "pos.venta", "inventario.ver", "clientes.crear",
+            "reservas.ver", "reservas.completar"
+        ]
+    else:
+        permisos_lista = [p.codename for p in usuario.rol.permisos] if (usuario.rol and usuario.rol.permisos) else ["catalogo.ver"]
 
     return {
         "id": usuario.id,
@@ -583,6 +600,9 @@ def obtener_perfil(user_id: Optional[str] = None, db: Session = Depends(get_db))
         "telefono": persona.telefono if (persona and hasattr(persona, 'telefono')) else "",
         "direccion": persona.direccion if (persona and hasattr(persona, 'direccion')) else "",
         "rol": rol_nombre,
+        "is_superuser": es_admin,
+        "roles": [rol_nombre],
+        "permisos": permisos_lista,
         "cliente_id": persona.ci if persona else str(usuario.id)
     }
 
