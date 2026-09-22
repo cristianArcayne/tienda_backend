@@ -28,6 +28,7 @@ class DetalleReservaResponse(BaseModel):
 
 class ReservaCreate(BaseModel):
     cliente_id: Optional[Union[str, int]] = "admin"
+    cliente_nombre: Optional[str] = None
     sucursal_id: int
     hora_estimada: Optional[str] = "18:00"
     detalles: Optional[List[DetalleReservaCreate]] = None

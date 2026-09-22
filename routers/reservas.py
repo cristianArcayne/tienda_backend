@@ -45,6 +45,16 @@ def _formatear_reserva(reserva: Reserva) -> ReservaResponse:
             )
         )
 
+    cli_nom = None
+    if reserva.cliente:
+        n = getattr(reserva.cliente, 'nombre', '') or ''
+        ap = getattr(reserva.cliente, 'apellido_pat', '') or ''
+        full = f"{n} {ap}".strip()
+        cli_nom = full if full else str(reserva.cliente_id)
+
+    if not cli_nom:
+        cli_nom = f"Cliente ({reserva.cliente_id})"
+
     return ReservaResponse(
         id=reserva.id,
         fecha=reserva.fecha,
@@ -54,7 +64,7 @@ def _formatear_reserva(reserva: Reserva) -> ReservaResponse:
         cliente_id=reserva.cliente_id,
         sucursal_id=reserva.sucursal_id,
         sucursal_nombre=reserva.sucursal.nombre if reserva.sucursal else None,
-        cliente_nombre=f"{reserva.cliente.nombre} {reserva.cliente.apellido_pat}".strip() if (reserva.cliente and hasattr(reserva.cliente, 'apellido_pat')) else (reserva.cliente.nombre if reserva.cliente else None),
+        cliente_nombre=cli_nom,
         detalles=detalles_resp,
         total_estimado=round(total_est, 2)
     )
@@ -124,9 +134,10 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
         if primer_cli and cliente_ci in ["default", "guest", "null", "undefined", ""]:
             cliente = primer_cli
         else:
+            nombre_crear = reserva_in.cliente_nombre or cliente_ci.capitalize()
             cliente = Cliente(
                 ci=cliente_ci,
-                nombre=cliente_ci.capitalize(),
+                nombre=nombre_crear,
                 apellido_pat="Web",
                 correo=f"cliente_{cliente_ci}@fashionstore.com",
                 telefono="+591 70000000",
@@ -134,6 +145,10 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
             )
             db.add(cliente)
             db.flush()
+
+    if reserva_in.cliente_nombre and cliente and cliente.nombre in [cliente_ci.capitalize(), "Admin", "Guest", "Default"]:
+        cliente.nombre = reserva_in.cliente_nombre
+        db.commit()
 
     # 2. Validar existencias y congelar stock
     for item in detalles_list:
