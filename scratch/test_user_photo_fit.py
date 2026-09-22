@@ -1,20 +1,23 @@
 import os
-import io
-import base64
-from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageChops
+from PIL import Image, ImageChops, ImageFilter
 
-def test_perfect_fitting():
+def test_user_photo_fit():
     backend_dir = r"c:\Users\Cristian Arcayne\OneDrive\Documents\Sistemas de Informacion 2\Examen_Si2\fashionstore-backend"
     
-    # 1. Foto de usuario sintética
-    user_img = Image.new("RGBA", (768, 1024), (245, 245, 245, 255))
+    # 1. Cargar la foto real subida por el usuario
+    user_photo_path = r"C:\Users\Cristian Arcayne\.gemini\antigravity\brain\1dff14a3-ab66-4824-8e2f-eaa0f94da574\.user_uploaded\media_1790052968289.png"
+    if not os.path.exists(user_photo_path):
+        print("User photo not found")
+        return
+        
+    user_img = Image.open(user_photo_path).convert("RGBA")
     u_w, u_h = user_img.size
+    print(f"User image size: {u_w}x{u_h}")
     
-    # Prenda de prueba
+    # 2. Cargar la prenda
     garment_path = os.path.join(backend_dir, "static", "uploads", "polera_oversize_negra.jpg")
     garment_img = Image.open(garment_path).convert("RGBA")
     
-    # Limpieza de silueta
     threshold = 230
     r, g, b, a = garment_img.split()
     mask_r = r.point(lambda p: 0 if p > threshold else 255)
@@ -29,57 +32,47 @@ def test_perfect_fitting():
         garment_img = garment_img.crop(bbox)
         
     gw, gh = garment_img.size
-    alpha = garment_img.split()[3]
+    alpha_prenda = garment_img.split()[3]
     
-    def first_y(x_pos):
+    def obtener_y_primer_pixel(x_pos):
         for y in range(gh):
-            if alpha.getpixel((x_pos, y)) > 50:
+            if alpha_prenda.getpixel((x_pos, y)) > 50:
                 return y
         return 0
 
-    y_left = first_y(int(gw * 0.22))
-    y_right = first_y(int(gw * 0.78))
-    shoulder_y_offset = (y_left + y_right) // 2
+    y_left_shoulder = obtener_y_primer_pixel(int(gw * 0.22))
+    y_right_shoulder = obtener_y_primer_pixel(int(gw * 0.78))
+    shoulder_y_offset = (y_left_shoulder + y_right_shoulder) // 2
     
-    # Ajuste de ancho de torso
-    ratio = u_w / u_h
-    es_retrato = ratio > 0.60
+    # Probemos ajustar pos_y para fotos donde los hombros están alrededor del 48-52% de la imagen (como en la foto del usuario)
+    # En la foto del usuario, el rostro toma los primeros 45% y los hombros están a y=500 de 1024 (aprox 0.48 - 0.50)
+    torso_w = int(u_w * 0.76)
+    aspect_garment = gh / max(gw, 1)
+    torso_h = int(torso_w * aspect_garment)
     
-    torso_w = int(u_w * (0.64 if es_retrato else 0.66))
-    aspect = gh / max(gw, 1)
-    torso_h = int(torso_w * aspect)
-    
-    max_h = int(u_h * 0.48)
-    if torso_h > max_h:
-        torso_h = max_h
-        torso_w = int(torso_h / aspect)
-        
     garment_resized = garment_img.resize((torso_w, torso_h), Image.Resampling.LANCZOS)
     
-    # Deformación anatómica trapezoidal (Shoulder Taper)
     w, h = garment_resized.size
-    taper_x = int(w * 0.035)
+    taper_x = int(w * 0.02)
     quad = (-taper_x, 0, 0, h, w, h, w + taper_x, 0)
     garment_warped = garment_resized.transform((w, h), Image.QUAD, quad, resample=Image.Resampling.BILINEAR)
     
-    # Desvanecimiento sutil de bordes (Feathering)
     alpha_ch = garment_warped.split()[3]
     alpha_blurred = alpha_ch.filter(ImageFilter.GaussianBlur(radius=1.2))
     garment_warped.putalpha(alpha_blurred)
     
-    # Posicionamiento exacto por la línea de hombros
     pos_x = (u_w - torso_w) // 2
-    target_shoulder_y = int(u_h * (0.30 if es_retrato else 0.22))
+    # El usuario tiene la cabeza en primer plano, hombros inician en y ~ 0.48 * u_h
+    target_shoulder_y = int(u_h * 0.48)
     scaled_shoulder_offset = int(shoulder_y_offset * (torso_h / gh))
     pos_y = target_shoulder_y - scaled_shoulder_offset
     
     combined = user_img.copy()
     combined.paste(garment_warped, (pos_x, pos_y), garment_warped)
     
-    out_path = os.path.join(backend_dir, "scratch", "test_perfect_fitting.jpg")
+    out_path = os.path.join(backend_dir, "scratch", "test_user_photo_fit.jpg")
     combined.convert("RGB").save(out_path, format="JPEG", quality=95)
-    print("Perfect fitting test saved to:", out_path)
+    print("Saved user photo fit to:", out_path)
 
 if __name__ == "__main__":
-    test_perfect_fitting()
-
+    test_user_photo_fit()

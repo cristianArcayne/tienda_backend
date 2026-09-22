@@ -480,7 +480,14 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 
         # 5. Alineación precisa por línea de hombros
         pos_x = (u_w - torso_w) // 2
-        target_shoulder_y = int(u_h * (0.30 if es_foto_retrato else 0.22))
+        # Para fotos verticales altas (retrato), los hombros están normalmente entre 0.44 y 0.48 de la altura total
+        if u_h > u_w * 1.2:
+            target_shoulder_y = int(u_h * 0.46)
+        elif es_foto_retrato:
+            target_shoulder_y = int(u_h * 0.35)
+        else:
+            target_shoulder_y = int(u_h * 0.25)
+
         scaled_shoulder_offset = int(shoulder_y_offset * (torso_h / gh))
         pos_y = target_shoulder_y - scaled_shoulder_offset
 
