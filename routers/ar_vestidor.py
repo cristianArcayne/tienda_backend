@@ -207,10 +207,25 @@ def validar_ajuste_corporal(request: ValidarAjusteCorporalRequest, db: Session =
 
 
 # ============================================================
-# VIRTUAL TRY-ON CON IA (Google AI Studio / Gemini Vision)
+# VIRTUAL TRY-ON CON IA (Google AI Studio + Segmind Failover)
 # ============================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+SEGMIND_API_KEY = os.getenv("SEGMIND_API_KEY", "SG_6197dc2bb848ae07")
+SEGMIND_API_URL = "https://api.segmind.com/v1/idm-vton"
+
+
+def _detectar_categoria_garment(prenda) -> str:
+    """Detecta la categoría de la prenda para difusión IA (upper_body, lower_body, dresses)"""
+    nombre = (prenda.nombre or "").lower()
+    cat_nombre = (prenda.categoria.nombre if prenda.categoria else "").lower()
+
+    if any(w in nombre or w in cat_nombre for w in ["pantalon", "jean", "short", "falda", "bermuda", "inferior"]):
+        return "lower_body"
+    elif any(w in nombre or w in cat_nombre for w in ["vestido", "enterizo", "overol", "mono", "jumpsuit"]):
+        return "dresses"
+
+    return "upper_body"
 
 
 async def _generar_gemini_vision_tryon(foto_usuario_bytes: bytes, garment_bytes: bytes, prenda_nombre: str) -> Optional[str]:
@@ -291,8 +306,70 @@ async def _generar_gemini_vision_tryon(foto_usuario_bytes: bytes, garment_bytes:
     return None
 
 
+async def _generar_segmind_tryon(foto_usuario_bytes: bytes, garment_bytes: bytes, prenda_nombre: str, category: str = "upper_body") -> Optional[str]:
+    """
+    Motor Nivel 2: Segmind IDM-VTON (IA de deformación 3D de prendas).
+    Convierte prendas PNG transparentes a JPEG con fondo blanco sólido para evitar errores.
+    """
+    api_key = os.getenv("SEGMIND_API_KEY", SEGMIND_API_KEY).strip()
+    if not api_key:
+        return None
+
+    try:
+        from PIL import Image, ImageOps
+        import io
+
+        # 1. Preprocesar foto de usuario a 3:4 (768x1024)
+        img_u = Image.open(io.BytesIO(foto_usuario_bytes))
+        img_u = ImageOps.exif_transpose(img_u).convert("RGB")
+        img_u_res = img_u.resize((768, 1024), Image.Resampling.LANCZOS)
+        buf_u = io.BytesIO()
+        img_u_res.save(buf_u, format="JPEG", quality=92)
+        user_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_u.getvalue()).decode("utf-8")
+
+        # 2. Preprocesar prenda: Si tiene transparencia PNG, montarla sobre fondo blanco JPEG
+        img_g = Image.open(io.BytesIO(garment_bytes))
+        img_g = ImageOps.exif_transpose(img_g)
+        if img_g.mode in ("RGBA", "LA") or (img_g.mode == "P" and "transparency" in img_g.info):
+            img_g = img_g.convert("RGBA")
+            white_bg = Image.new("RGBA", img_g.size, (255, 255, 255, 255))
+            img_g = Image.alpha_composite(white_bg, img_g).convert("RGB")
+        else:
+            img_g = img_g.convert("RGB")
+
+        buf_g = io.BytesIO()
+        img_g.save(buf_g, format="JPEG", quality=95)
+        garment_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_g.getvalue()).decode("utf-8")
+
+        headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+        payload = {
+            "human_img": user_b64,
+            "garm_img": garment_b64,
+            "category": category,
+            "crop": True,
+            "seed": 42,
+            "steps": 30,
+            "garment_des": prenda_nombre or "clothing item"
+        }
+
+        print("[IA Vestidor] Intentando Segmind IDM-VTON Nivel 2...")
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(SEGMIND_API_URL, headers=headers, json=payload)
+            if resp.status_code >= 200 and resp.status_code < 300:
+                c_type = resp.headers.get("content-type", "").lower()
+                body_bytes = resp.content
+                if "image" in c_type or (len(body_bytes) > 1000 and (body_bytes.startswith(b"\xff\xd8") or body_bytes.startswith(b"\x89PNG"))):
+                    mime = "image/png" if body_bytes.startswith(b"\x89PNG") else "image/jpeg"
+                    print("[IA Vestidor] ¡Segmind IDM-VTON exitoso!")
+                    return f"data:{mime};base64,{base64.b64encode(body_bytes).decode('utf-8')}"
+    except Exception as e:
+        print(f"[IA Vestidor Segmind Error] {e}")
+
+    return None
+
+
 def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: str) -> str:
-    """Motor Fallback: elimina fondo blanco del JPG de la prenda y la posiciona sobre los hombros."""
+    """Motor Fallback Adaptativo: recorta la silueta exacta de la prenda sin cuadros grises/blancos y la encaja en el cuello/hombros."""
     try:
         from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageChops
         import io
@@ -323,35 +400,36 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 
         garment_img = ImageOps.exif_transpose(garment_img).convert("RGBA")
 
-        # 1. Eliminar recuadro blanco/claro del JPG de la prenda
-        threshold = 220
+        # 1. Extracción limpia de silueta (elimina cuadros grises, blancos o bordes cuadrados)
+        threshold = 230
         r, g, b, a = garment_img.split()
         mask_r = r.point(lambda p: 0 if p > threshold else 255)
         mask_g = g.point(lambda p: 0 if p > threshold else 255)
         mask_b = b.point(lambda p: 0 if p > threshold else 255)
         mask_combined = ImageChops.lighter(ImageChops.lighter(mask_r, mask_g), mask_b)
-        garment_img.putalpha(mask_combined)
+        mask_final = ImageChops.darker(a, mask_combined)
+        garment_img.putalpha(mask_final)
 
         # Recortar bordes transparentes sobrantes
         bbox = garment_img.getbbox()
         if bbox:
             garment_img = garment_img.crop(bbox)
 
-        # 2. Posicionar sobre los hombros
+        # 2. Proporciones y alineación anatómica al cuello
         ratio = u_w / u_h
-        es_foto_parcial = ratio > 0.65
+        es_foto_retrato = ratio > 0.60
 
-        if es_foto_parcial:
-            torso_w = int(u_w * 0.60)
-            pos_y_factor = 0.45
+        if es_foto_retrato:
+            torso_w = int(u_w * 0.62)
+            pos_y_factor = 0.35  # Base del cuello para fotos en plano medio
         else:
-            torso_w = int(u_w * 0.70)
-            pos_y_factor = 0.235
+            torso_w = int(u_w * 0.65)
+            pos_y_factor = 0.25  # Base del cuello para fotos a cuerpo entero
 
         aspect_garment = garment_img.height / max(garment_img.width, 1)
         torso_h = int(torso_w * aspect_garment)
 
-        max_h = int(u_h * 0.48)
+        max_h = int(u_h * 0.44)
         if torso_h > max_h:
             torso_h = max_h
             torso_w = int(torso_h / aspect_garment)
@@ -378,7 +456,7 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 @router.post(
     "/try-on-ia",
     summary="Probador virtual con IA: sube tu foto y pruébate la ropa",
-    description="Envía una foto personal y el ID de la prenda. Utiliza exclusivamente Google AI Studio (Gemini Vision) para la superposición fotorrealista con fallback inteligente."
+    description="Envía una foto personal y el ID de la prenda. Utiliza pipeline de 3 niveles con IA (Google AI Studio -> Segmind IDM-VTON -> Pillow Smart Composite)."
 )
 async def try_on_ia(
     foto_usuario: UploadFile = File(..., description="Foto del usuario (JPG/PNG) - acepta cara, medio cuerpo o cuerpo completo"),
@@ -424,7 +502,7 @@ async def try_on_ia(
                 pass
 
     # ============================================================
-    # MOTOR PRINCIPAL: GOOGLE AI STUDIO (GEMINI VISION)
+    # NIVEL 1: GOOGLE AI STUDIO (GEMINI VISION)
     # ============================================================
     if prenda_bytes:
         gemini_result = await _generar_gemini_vision_tryon(
@@ -441,9 +519,28 @@ async def try_on_ia(
             }
 
     # ============================================================
-    # MOTOR FALLBACK: PILLOW SMART COMPOSITE
+    # NIVEL 2: SEGMIND IDM-VTON (DIFUSIÓN 3D)
     # ============================================================
-    print("[IA Vestidor] Google AI Studio no disponible temporalmente. Usando síntesis inteligente Pillow.")
+    if prenda_bytes:
+        category = _detectar_categoria_garment(prenda)
+        segmind_result = await _generar_segmind_tryon(
+            contenido_foto_original,
+            prenda_bytes,
+            prenda.nombre or "Prenda",
+            category=category
+        )
+        if segmind_result:
+            return {
+                "success": True,
+                "imagen_resultado": segmind_result,
+                "prenda_nombre": prenda.nombre,
+                "mensaje": f"¡Así te queda {prenda.nombre}! Generado con IA IDM-VTON."
+            }
+
+    # ============================================================
+    # NIVEL 3: PILLOW SMART COMPOSITE (ENCAJE ANATÓMICO SIN CUADROS)
+    # ============================================================
+    print("[IA Vestidor] Nivel 1 y 2 no disponibles. Usando síntesis limpia en cuello y hombros.")
     img_fallback = _generar_composite_fallback(contenido_foto_original, prenda.imagen_uri)
     return {
         "success": True,
@@ -451,5 +548,6 @@ async def try_on_ia(
         "prenda_nombre": prenda.nombre,
         "mensaje": f"¡Así te queda {prenda.nombre}! Generado con síntesis adaptativa."
     }
+
 
 
