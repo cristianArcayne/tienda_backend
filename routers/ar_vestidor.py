@@ -262,13 +262,20 @@ async def _generar_gemini_vision_tryon(foto_usuario_bytes: bytes, garment_bytes:
         user_b64 = base64.b64encode(foto_usuario_bytes).decode("utf-8")
         garment_b64 = base64.b64encode(garment_bytes).decode("utf-8")
 
-    models_to_try = ["gemini-2.5-flash-image", "gemini-3.1-flash-image", "gemini-3.6-flash"]
+    models_to_try = [
+        "gemini-2.5-flash-image",
+        "gemini-3.1-flash-image",
+        "gemini-3-pro-image",
+        "gemini-3.6-flash"
+    ]
 
     prompt_text = (
-        f"Virtual try-on task: Fit the garment '{prenda_nombre}' shown in the second image "
-        f"seamlessly onto the body of the person in the first image. "
-        f"Preserve the person's face, facial features, pose, skin tone, hands, and background. "
-        f"Return only the final try-on result image."
+        f"High-quality photorealistic Virtual Try-On task: Take the person in Image 1 and fit the garment "
+        f"'{prenda_nombre}' from Image 2 seamlessly onto their body posture. "
+        f"Warp and contour the garment shoulders, chest, and collar to naturally adapt to the body shape. "
+        f"Align the neck collar precisely at the base of the neck without clipping into chin or face. "
+        f"Preserve facial features, expression, skin tone, hands, arms, hair, and original background. "
+        f"Output only the final photorealistic try-on result image."
     )
 
     for model in models_to_try:
@@ -368,8 +375,16 @@ async def _generar_segmind_tryon(foto_usuario_bytes: bytes, garment_bytes: bytes
     return None
 
 
-def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: str) -> str:
-    """Motor Fallback Adaptativo: recorta la silueta exacta de la prenda sin cuadros grises/blancos y la encaja en el cuello/hombros."""
+def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: str, prenda_nombre: str = "") -> str:
+    """
+    Motor Fallback Adaptativo Anatómicamente Avanzado:
+    Sincroniza y adapta la prenda al cuerpo y viceversa:
+    1. Extrae la silueta limpia sin fondo gris/blanco y desvanece suavemente los bordes (GaussianBlur).
+    2. Mide dinámicamente la altura exacta de la línea de hombros (shoulder_y_offset).
+    3. Ajusta el ancho de torso según la prenda (Polera: 61-64%, Oversize/Chompa: 65-67%, Chaqueta: 68-70%).
+    4. Aplica deformación anatómica de hombros (Shoulder Taper) mediante transformación QUAD.
+    5. Alinea la costura de los hombros de la prenda a la altura anatómica del usuario (y ≈ 0.30 portrait / 0.22 full).
+    """
     try:
         from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageChops
         import io
@@ -415,32 +430,62 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
         if bbox:
             garment_img = garment_img.crop(bbox)
 
-        # 2. Proporciones y alineación anatómica al cuello
+        gw, gh = garment_img.size
+        alpha_prenda = garment_img.split()[3]
+
+        # 2. Medir la altura de la línea de hombros de la prenda
+        def obtener_y_primer_pixel(x_pos):
+            for y in range(gh):
+                if alpha_prenda.getpixel((x_pos, y)) > 50:
+                    return y
+            return 0
+
+        y_left_shoulder = obtener_y_primer_pixel(int(gw * 0.22))
+        y_right_shoulder = obtener_y_primer_pixel(int(gw * 0.78))
+        shoulder_y_offset = (y_left_shoulder + y_right_shoulder) // 2
+
+        # 3. Determinación de proporciones anatómicas según categoría y foto
         ratio = u_w / u_h
         es_foto_retrato = ratio > 0.60
 
-        if es_foto_retrato:
-            torso_w = int(u_w * 0.62)
-            pos_y_factor = 0.35  # Base del cuello para fotos en plano medio
+        nom_lower = (prenda_nombre or "").lower()
+        if any(w in nom_lower for w in ["chaqueta", "abrig", "chamara", "coat"]):
+            factor_ancho = 0.68 if es_foto_retrato else 0.70
+        elif any(w in nom_lower for w in ["oversize", "chompa", "hoodie", "sudadera"]):
+            factor_ancho = 0.65 if es_foto_retrato else 0.67
         else:
-            torso_w = int(u_w * 0.65)
-            pos_y_factor = 0.25  # Base del cuello para fotos a cuerpo entero
+            factor_ancho = 0.61 if es_foto_retrato else 0.64
 
-        aspect_garment = garment_img.height / max(garment_img.width, 1)
+        torso_w = int(u_w * factor_ancho)
+        aspect_garment = gh / max(gw, 1)
         torso_h = int(torso_w * aspect_garment)
 
-        max_h = int(u_h * 0.44)
+        max_h = int(u_h * 0.48)
         if torso_h > max_h:
             torso_h = max_h
             torso_w = int(torso_h / aspect_garment)
 
         garment_resized = garment_img.resize((torso_w, torso_h), Image.Resampling.LANCZOS)
 
+        # 4. Deformación anatómica trapezoidal (Shoulder Taper)
+        w, h = garment_resized.size
+        taper_x = int(w * 0.035)
+        quad = (-taper_x, 0, 0, h, w, h, w + taper_x, 0)
+        garment_warped = garment_resized.transform((w, h), Image.QUAD, quad, resample=Image.Resampling.BILINEAR)
+
+        # Suavizado de bordes (Feathering) para combinación orgánica sobre la piel
+        alpha_ch = garment_warped.split()[3]
+        alpha_blurred = alpha_ch.filter(ImageFilter.GaussianBlur(radius=1.2))
+        garment_warped.putalpha(alpha_blurred)
+
+        # 5. Alineación precisa por línea de hombros
         pos_x = (u_w - torso_w) // 2
-        pos_y = int(u_h * pos_y_factor)
+        target_shoulder_y = int(u_h * (0.30 if es_foto_retrato else 0.22))
+        scaled_shoulder_offset = int(shoulder_y_offset * (torso_h / gh))
+        pos_y = target_shoulder_y - scaled_shoulder_offset
 
         combined = user_img.copy()
-        combined.paste(garment_resized, (pos_x, pos_y), garment_resized)
+        combined.paste(garment_warped, (pos_x, pos_y), garment_warped)
 
         out_buf = io.BytesIO()
         combined.convert("RGB").save(out_buf, format="JPEG", quality=95)
@@ -541,7 +586,7 @@ async def try_on_ia(
     # NIVEL 3: PILLOW SMART COMPOSITE (ENCAJE ANATÓMICO SIN CUADROS)
     # ============================================================
     print("[IA Vestidor] Nivel 1 y 2 no disponibles. Usando síntesis limpia en cuello y hombros.")
-    img_fallback = _generar_composite_fallback(contenido_foto_original, prenda.imagen_uri)
+    img_fallback = _generar_composite_fallback(contenido_foto_original, prenda.imagen_uri, prenda.nombre or "")
     return {
         "success": True,
         "imagen_resultado": img_fallback,
