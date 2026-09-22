@@ -218,14 +218,58 @@ def eliminar_usuario(usuario_id: int, request: Request, db: Session = Depends(ge
 
 # === ROLES ===
 
+NOMBRES_AMIGABLES_PERMISOS = {
+    "inventario.view_catalogo": "👕 Ver Catálogo General de Productos",
+    "inventario.view_producto": "🔍 Consultar Ficha Detallada de Producto",
+    "inventario.add_producto": "➕ Crear Nuevos Productos en Catálogo",
+    "inventario.change_producto": "✏️ Editar Información de Productos",
+    "inventario.delete_producto": "🗑️ Eliminar Productos del Catálogo",
+    "vestidor.usar": "🕶️ Probar Ropa con IA y AR (Vestidor Virtual)",
+    "venta.add_venta": "💳 Registrar Ventas POS en Mostrador",
+    "venta.view_venta": "📜 Consultar Historial de Ventas",
+    "reservas.crear": "📦 Realizar Reservas Web-to-Store",
+    "reservas.ver": "📋 Ver Listado de Reservas",
+    "reservas.completar": "✅ Confirmar Entrega de Reservas",
+    "clientes.crear": "👥 Registrar Clientes Nuevos",
+    "clientes.ver": "👤 Consultar Lista de Clientes",
+    "reportes.view_reporte": "📊 Ver Reportes Tabulares y Estadísticas",
+    "reportes.voz": "🎙️ Utilizar Reportes por Voz e IA",
+    "promociones.view_promocion": "🏷️ Ver Promociones y Descuentos",
+    "promociones.add_promocion": "➕ Crear Nuevas Promociones",
+    "seguridad.view_usuario": "🛡️ Administrar Usuarios del Sistema",
+    "seguridad.view_rol": "🔑 Gestionar Roles y Permisos",
+    "bitacora.view_bitacora": "🔍 Ver Bitácora de Auditoría",
+    "LEER_CATALOGO": "📖 Lectura de Catálogo General",
+    "COMPRAR": "🛒 Realizar Compras Directas",
+}
+
+
 @router.get("/api/roles/permisos_disponibles")
 @router.get("/api/roles/permisos_disponibles/")
 @router.get("/api/v1/roles/permisos_disponibles")
 @router.get("/api/v1/roles/permisos_disponibles/")
 def permisos_disponibles(db: Session = Depends(get_db)):
-    """Retorna todos los permisos disponibles del sistema para asignar a roles."""
+    """Retorna los permisos funcionales del sistema formateados de forma clara en español, omitiendo claves técnicas auth_."""
     permisos = db.query(Permiso).order_by(Permiso.codename).all()
-    return [{"id": p.id, "nombre": p.nombre, "codename": p.codename} for p in permisos]
+    resultado = []
+    
+    for p in permisos:
+        code = (p.codename or "").lower()
+        if code.startswith("auth_") or code.startswith("auth.") or code.startswith("contenttypes") or code.startswith("admin."):
+            continue
+            
+        nombre_limpio = NOMBRES_AMIGABLES_PERMISOS.get(p.codename)
+        if not nombre_limpio:
+            partes = p.codename.replace("_", " ").replace(".", " - ").title()
+            nombre_limpio = f"⚙️ {partes}"
+
+        resultado.append({
+            "id": p.id,
+            "nombre": nombre_limpio,
+            "codename": p.codename
+        })
+        
+    return resultado
 
 @router.get("/api/roles")
 @router.get("/api/roles/")
