@@ -270,12 +270,20 @@ async def _generar_gemini_vision_tryon(foto_usuario_bytes: bytes, garment_bytes:
     ]
 
     prompt_text = (
-        f"High-quality photorealistic Virtual Try-On task: Take the person in Image 1 and fit the garment "
-        f"'{prenda_nombre}' from Image 2 seamlessly onto their body posture. "
-        f"Warp and contour the garment shoulders, chest, and collar to naturally adapt to the body shape. "
-        f"Align the neck collar precisely at the base of the neck without clipping into chin or face. "
-        f"Preserve facial features, expression, skin tone, hands, arms, hair, and original background. "
-        f"Output only the final photorealistic try-on result image."
+        f"Task: Adaptable, photorealistic Virtual Try-On.\n\n"
+        f"INPUT:\n"
+        f"- Image 1: Photo of a person (body, pose, skin tone, lighting, camera angle)\n"
+        f"- Image 2: Garment '{prenda_nombre}' from catalog\n\n"
+        f"INSTRUCTIONS:\n"
+        f"1. Detect body pose, light source, lighting direction, and body build of the person in Image 1.\n"
+        f"2. Seamlessly fit the garment '{prenda_nombre}' from Image 2 onto the torso, wrapping it along the body's real curvature.\n"
+        f"3. Generate realistic fabric folds, drapes, and wrinkles at flex points (armpits, shoulders, waist) matching the pose.\n"
+        f"4. Match white balance, color temperature, shadows, lighting, contrast, and noise/grain between garment and person.\n"
+        f"5. Align the collar precisely at the base of the actual neck without clipping into face or chin.\n"
+        f"6. Correctly handle occlusions: hide garment under hair, hands, or arms positioned in front.\n"
+        f"7. PRESERVE UNCHANGED: Face, expression, facial features, hair, skin tone, hands, arms, body proportions, and background.\n"
+        f"8. AVOID: Flat sticker effect, floating garment, clipping or unnatural box overlays.\n"
+        f"Output ONLY the final photorealistic try-on result image."
     )
 
     for model in models_to_try:

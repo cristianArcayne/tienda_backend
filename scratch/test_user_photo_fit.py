@@ -76,3 +76,4 @@ def test_user_photo_fit():
 
 if __name__ == "__main__":
     test_user_photo_fit()
+
