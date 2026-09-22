@@ -492,16 +492,33 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
             torso_w = int(torso_h / aspect_garment)
 
         garment_resized = garment_img.resize((torso_w, torso_h), Image.Resampling.LANCZOS)
+        w_res, h_res = garment_resized.size
 
-        # 4. Deformación anatómica trapezoidal (Shoulder Taper)
-        w, h = garment_resized.size
-        taper_x = int(w * 0.02)
-        quad = (-taper_x, 0, 0, h, w, h, w + taper_x, 0)
-        garment_warped = garment_resized.transform((w, h), Image.QUAD, quad, resample=Image.Resampling.BILINEAR)
+        # 4. Deformación Curvada de Cintura y Silueta Anatómica (Waist & Torso Contour Warp)
+        top_h = int(h_res * 0.45)
+        bottom_h = h_res - top_h
 
-        # Suavizado de bordes (Feathering) para combinación orgánica sobre la piel
+        top_half = garment_resized.crop((0, 0, w_res, top_h))
+        bottom_half = garment_resized.crop((0, top_h, w_res, h_res))
+
+        # Sección superior: Hombros ligeramente estrechados arriba (slope taper)
+        taper_top = int(w_res * 0.025)
+        quad_top = (-taper_top, 0, 0, top_h, w_res, top_h, w_res + taper_top, 0)
+        top_warped = top_half.transform((w_res, top_h), Image.QUAD, quad_top, resample=Image.Resampling.BILINEAR)
+
+        # Sección inferior: Ajuste de cintura (entalle suave en el medio)
+        waist_taper = int(w_res * 0.038)
+        quad_bottom = (0, 0, waist_taper, bottom_h, w_res - waist_taper, bottom_h, w_res, 0)
+        bottom_warped = bottom_half.transform((w_res, bottom_h), Image.QUAD, quad_bottom, resample=Image.Resampling.BILINEAR)
+
+        # Unir ambas secciones contorneadas al cuerpo
+        garment_warped = Image.new("RGBA", (w_res, h_res), (0, 0, 0, 0))
+        garment_warped.paste(top_warped, (0, 0))
+        garment_warped.paste(bottom_warped, (0, top_h))
+
+        # Suavizado orgánico de bordes (Feathering)
         alpha_ch = garment_warped.split()[3]
-        alpha_blurred = alpha_ch.filter(ImageFilter.GaussianBlur(radius=1.2))
+        alpha_blurred = alpha_ch.filter(ImageFilter.GaussianBlur(radius=1.3))
         garment_warped.putalpha(alpha_blurred)
 
         # 5. Alineación precisa por línea de hombros (Base del cuello)
