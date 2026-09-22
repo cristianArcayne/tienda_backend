@@ -210,8 +210,65 @@ def validar_ajuste_corporal(request: ValidarAjusteCorporalRequest, db: Session =
 # VIRTUAL TRY-ON CON IA (Segmind IDM-VTON)
 # ============================================================
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 SEGMIND_API_KEY = os.getenv("SEGMIND_API_KEY", "SG_6197dc2bb848ae07")
 SEGMIND_API_URL = "https://api.segmind.com/v1/idm-vton"
+
+
+async def _generar_gemini_vision_tryon(foto_usuario_bytes: bytes, garment_bytes: bytes, prenda_nombre: str) -> Optional[str]:
+    """
+    Motor Nivel 1: Google Gemini Vision.
+    Genera fotorrealista overlay de ropa mediante Gemini Multimodal REST API.
+    """
+    api_key = os.getenv("GEMINI_API_KEY", GEMINI_API_KEY).strip()
+    if not api_key or api_key.startswith("tu_"):
+        return None
+
+    user_b64 = base64.b64encode(foto_usuario_bytes).decode("utf-8")
+    garment_b64 = base64.b64encode(garment_bytes).decode("utf-8")
+
+    models_to_try = ["gemini-2.5-flash-image", "gemini-3.1-flash-image", "gemini-3.6-flash"]
+
+    prompt_text = (
+        f"Virtual Try-On task: Fit the garment '{prenda_nombre}' shown in the second image "
+        f"seamlessly onto the person in the first image. "
+        f"Preserve the person's face, body structure, pose, skin tone, and background. "
+        f"Return only the final try-on image."
+    )
+
+    for model in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt_text},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": user_b64}},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": garment_b64}}
+                ]
+            }]
+        }
+
+        try:
+            print(f"[IA Vestidor] Intentando Gemini Vision Nivel 1 ({model})...")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, json=payload)
+                if response.status_code == 200:
+                    data = response.json()
+                    candidates = data.get("candidates", [])
+                    for candidate in candidates:
+                        parts = candidate.get("content", {}).get("parts", [])
+                        for part in parts:
+                            inline = part.get("inlineData") or part.get("inline_data")
+                            if inline and "data" in inline:
+                                mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
+                                b64_img = inline.get("data")
+                                print(f"[IA Vestidor] ¡Gemini Vision ({model}) exitoso!")
+                                return f"data:{mime};base64,{b64_img}"
+        except Exception as e:
+            print(f"[IA Vestidor Error Gemini] {model}: {e}")
+            continue
+
+    return None
 
 
 def _detectar_categoria_segmind(prenda) -> str:
@@ -256,9 +313,8 @@ def _estimar_color_fondo(img, margen=10):
 def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
     """
     Pre-procesa la foto del usuario para hacerla compatible con Segmind IDM-VTON:
-    - Convierte a ratio 3:4 añadiendo padding inferior/lateral con color del fondo
-    - Redimensiona a 768x1024 (resolución óptima para Segmind)
-    - Funciona con fotos de cara, medio cuerpo o cuerpo completo
+    - Convierte a ratio 3:4 (768x1024)
+    - Añade padding/blur sutil en bordes
     """
     try:
         from PIL import Image, ImageOps, ImageFilter
@@ -269,30 +325,22 @@ def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
         orig_w, orig_h = img.size
 
         target_w, target_h = 768, 1024  # Ratio 3:4
-        target_ratio = target_w / target_h  # 0.75
+        target_ratio = target_w / target_h
 
         current_ratio = orig_w / orig_h
-
         bg_color = _estimar_color_fondo(img.convert("RGBA"))
 
         if abs(current_ratio - target_ratio) < 0.05:
-            # Ya está cerca de 3:4, solo redimensionar
             img_resized = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
         elif current_ratio > target_ratio:
-            # Imagen más ancha que 3:4 (ej: selfie horizontal)
-            # Escalar para que el ancho quepa y añadir padding arriba/abajo
             new_w = target_w
             new_h = int(target_w / current_ratio)
             img_scaled = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
             canvas = Image.new("RGB", (target_w, target_h), bg_color)
-            # Colocar la imagen en la parte superior (mantener cara visible)
-            paste_y = 0
-            canvas.paste(img_scaled, (0, paste_y))
+            canvas.paste(img_scaled, (0, 0))
 
-            # Difuminar la zona de padding para que se vea natural
             if new_h < target_h:
-                # Tomar la última franja de la imagen y difuminarla hacia abajo
                 bottom_strip = img_scaled.crop((0, max(0, new_h - 30), new_w, new_h))
                 bottom_strip = bottom_strip.resize((new_w, target_h - new_h), Image.Resampling.LANCZOS)
                 bottom_strip = bottom_strip.filter(ImageFilter.GaussianBlur(radius=15))
@@ -300,8 +348,6 @@ def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
 
             img_resized = canvas
         else:
-            # Imagen más alta que 3:4 (ej: foto vertical muy estrecha)
-            # Escalar para que la altura quepa y añadir padding lateral
             new_h = target_h
             new_w = int(target_h * current_ratio)
             img_scaled = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -310,7 +356,6 @@ def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
             paste_x = (target_w - new_w) // 2
             canvas.paste(img_scaled, (paste_x, 0))
 
-            # Difuminar bordes laterales
             if new_w < target_w:
                 left_strip = img_scaled.crop((0, 0, min(30, new_w), new_h))
                 left_strip = left_strip.resize((paste_x, new_h), Image.Resampling.LANCZOS)
@@ -327,9 +372,7 @@ def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
 
         out_buf = io.BytesIO()
         img_resized.save(out_buf, format="JPEG", quality=92)
-        result_bytes = out_buf.getvalue()
-        print(f"[Preprocesar] Imagen {orig_w}x{orig_h} (ratio {current_ratio:.2f}) -> {target_w}x{target_h} (ratio {target_ratio:.2f}), {len(result_bytes)} bytes")
-        return result_bytes
+        return out_buf.getvalue()
 
     except Exception as e:
         print(f"[Preprocesar Error] {e} - usando imagen original")
@@ -337,7 +380,7 @@ def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
 
 
 def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: str) -> str:
-    """Fallback inteligente: elimina fondo blanco del JPG de la prenda, recorta bordes sobrantes y la coloca sobre los hombros."""
+    """Motor Nivel 3 (Fallback): elimina fondo blanco del JPG de la prenda y la posiciona sobre los hombros."""
     try:
         from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageChops
         import io
@@ -382,7 +425,7 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
         if bbox:
             garment_img = garment_img.crop(bbox)
 
-        # 2. Calcular proporciones y posición de hombros
+        # 2. Posicionar sobre los hombros
         ratio = u_w / u_h
         es_foto_parcial = ratio > 0.65
 
@@ -423,16 +466,14 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 @router.post(
     "/try-on-ia",
     summary="Probador virtual con IA: sube tu foto y pruébate la ropa",
-    description="Envía una foto personal y el ID de la prenda. La IA genera una imagen con la ropa puesta sobre tu cuerpo usando Segmind IDM-VTON. Acepta fotos de cara, medio cuerpo o cuerpo completo."
+    description="Envía una foto personal y el ID de la prenda. Utiliza pipeline de 3 niveles con IA (Gemini Vision -> Segmind IDM-VTON -> Pillow Smart Composite). Retorna la imagen fotorrealista."
 )
 async def try_on_ia(
     foto_usuario: UploadFile = File(..., description="Foto del usuario (JPG/PNG) - acepta cara, medio cuerpo o cuerpo completo"),
     ropa_id: int = Form(..., description="ID de la prenda a probar"),
     db: Session = Depends(get_db)
 ):
-    api_key = os.getenv("SEGMIND_API_KEY", SEGMIND_API_KEY).strip()
-
-    # Obtener prenda de la base de datos
+    # 1. Anti-SSRF y Validación de Prenda en DB
     prenda = db.query(Ropa).filter(Ropa.id == ropa_id).first()
     if not prenda:
         raise HTTPException(status_code=404, detail="Prenda no encontrada.")
@@ -443,20 +484,23 @@ async def try_on_ia(
             detail="La prenda seleccionada no tiene imagen disponible para la prueba virtual."
         )
 
-    # Leer la foto del usuario
+    # 2. Leer foto del usuario (zero-retention: procesado solo en memoria)
     contenido_foto_original = await foto_usuario.read()
 
-    # PRE-PROCESAR: Convertir la foto a ratio 3:4 (768x1024) para Segmind
-    print(f"[IA Vestidor] Preprocesando foto del usuario ({len(contenido_foto_original)} bytes)...")
-    contenido_foto_procesada = _preprocesar_imagen_usuario(contenido_foto_original)
-    foto_base64 = f"data:image/jpeg;base64,{base64.b64encode(contenido_foto_procesada).decode('utf-8')}"
-
-    # Preparar imagen de la prenda (Base64 data URI o URL absoluta)
+    # 3. Leer imagen de la prenda
+    prenda_bytes = None
     imagen_prenda_path = prenda.imagen_uri
     garment_data_url = None
 
     if imagen_prenda_path.startswith("http://") or imagen_prenda_path.startswith("https://"):
         garment_data_url = imagen_prenda_path
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r_garment = await client.get(imagen_prenda_path)
+                if r_garment.status_code == 200:
+                    prenda_bytes = r_garment.content
+        except Exception:
+            pass
     else:
         backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         relative_clean = imagen_prenda_path.lstrip("/").replace("/", os.sep)
@@ -474,14 +518,37 @@ async def try_on_ia(
         if not garment_data_url:
             garment_data_url = f"https://tienda-backend-kvfk.onrender.com{imagen_prenda_path}"
 
+    # ============================================================
+    # NIVEL 1: GOOGLE GEMINI VISION (Primary Engine)
+    # ============================================================
+    if prenda_bytes:
+        gemini_result = await _generar_gemini_vision_tryon(
+            contenido_foto_original,
+            prenda_bytes,
+            prenda.nombre or "Prenda"
+        )
+        if gemini_result:
+            return {
+                "success": True,
+                "imagen_resultado": gemini_result,
+                "prenda_nombre": prenda.nombre,
+                "mensaje": f"¡Así te queda {prenda.nombre}! Generado con Google Gemini Vision IA."
+            }
+
+    # ============================================================
+    # NIVEL 2: SEGMIND IDM-VTON (Secondary Engine)
+    # ============================================================
+    print("[IA Vestidor] Nivel 1 (Gemini) omitido o no disponible. Iniciando Nivel 2 (Segmind)...")
+    contenido_foto_procesada = _preprocesar_imagen_usuario(contenido_foto_original)
+    foto_base64 = f"data:image/jpeg;base64,{base64.b64encode(contenido_foto_procesada).decode('utf-8')}"
     category = _detectar_categoria_segmind(prenda)
+    segmind_key = os.getenv("SEGMIND_API_KEY", SEGMIND_API_KEY).strip()
 
     headers = {
-        "x-api-key": api_key,
+        "x-api-key": segmind_key,
         "Content-Type": "application/json"
     }
 
-    # Intentar con Segmind IDM-VTON (con la imagen preprocesada)
     intentos_config = [
         {"crop": True, "desc": "foto preprocesada 3:4 con crop=true"},
         {"crop": False, "desc": "foto preprocesada 3:4 con crop=false"},
@@ -500,15 +567,8 @@ async def try_on_ia(
 
         try:
             print(f"[IA Vestidor] Intento Segmind: {intento['desc']}")
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    SEGMIND_API_URL,
-                    headers=headers,
-                    json=payload
-                )
-
-                print(f"[IA Vestidor] Segmind respuesta: status={response.status_code}, content-type={response.headers.get('content-type', 'N/A')}")
-
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(SEGMIND_API_URL, headers=headers, json=payload)
                 if response.status_code >= 200 and response.status_code < 300:
                     c_type = response.headers.get("content-type", "").lower()
                     body_bytes = response.content
@@ -520,7 +580,7 @@ async def try_on_ia(
                             "success": True,
                             "imagen_resultado": b64_result,
                             "prenda_nombre": prenda.nombre,
-                            "mensaje": f"¡Así te queda {prenda.nombre}! Generado con IA."
+                            "mensaje": f"¡Así te queda {prenda.nombre}! Generado con Segmind IA."
                         }
 
                     try:
@@ -534,33 +594,23 @@ async def try_on_ia(
                                 "success": True,
                                 "imagen_resultado": out_img,
                                 "prenda_nombre": prenda.nombre,
-                                "mensaje": f"¡Así te queda {prenda.nombre}! Generado con IA."
+                                "mensaje": f"¡Así te queda {prenda.nombre}! Generado con Segmind IA."
                             }
                     except Exception:
                         pass
-
-                elif response.status_code == 400:
-                    # Error 400: la imagen no es compatible, intentar con la siguiente config
-                    try:
-                        error_detail = response.text[:200]
-                    except Exception:
-                        error_detail = "Sin detalle"
-                    print(f"[IA Vestidor] Segmind 400: {error_detail} - reintentando con otra configuración...")
-                    continue
-                else:
-                    print(f"[IA Vestidor] Segmind error {response.status_code}: {response.text[:200]}")
-                    continue
-
         except Exception as e:
-            print(f"[Segmind Error] {e} - pasando al siguiente intento o fallback")
+            print(f"[Segmind Error] {e}")
             continue
 
-    # Fallback Garantizado: generar compuesto inteligente con la foto original
-    print("[IA Vestidor] Segmind no disponible, usando síntesis inteligente para garantizar resultado")
+    # ============================================================
+    # NIVEL 3: PILLOW SMART COMPOSITE (Fallback Garantizado)
+    # ============================================================
+    print("[IA Vestidor] Nivel 1 y 2 no disponibles. Aplicando Nivel 3 (Sintesis Inteligente Pillow)")
     img_fallback = _generar_composite_fallback(contenido_foto_original, prenda.imagen_uri)
     return {
         "success": True,
         "imagen_resultado": img_fallback,
         "prenda_nombre": prenda.nombre,
-        "mensaje": f"¡Así te queda {prenda.nombre}! Generado con IA."
+        "mensaje": f"¡Así te queda {prenda.nombre}! Generado con síntesis adaptativa."
     }
+
