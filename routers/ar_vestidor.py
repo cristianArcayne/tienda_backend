@@ -439,13 +439,16 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
         garment_img = ImageOps.exif_transpose(garment_img).convert("RGBA")
 
         # 1. Extracción limpia de silueta (elimina cuadros grises, blancos o bordes cuadrados)
-        threshold = 230
+        threshold = 215
         r, g, b, a = garment_img.split()
         mask_r = r.point(lambda p: 0 if p > threshold else 255)
         mask_g = g.point(lambda p: 0 if p > threshold else 255)
         mask_b = b.point(lambda p: 0 if p > threshold else 255)
         mask_combined = ImageChops.lighter(ImageChops.lighter(mask_r, mask_g), mask_b)
         mask_final = ImageChops.darker(a, mask_combined)
+
+        # Eliminar 1-2px de bordes blanquecinos sobrantes
+        mask_final = mask_final.filter(ImageFilter.MinFilter(size=3))
         garment_img.putalpha(mask_final)
 
         # Recortar bordes transparentes sobrantes
@@ -467,23 +470,23 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
         y_right_shoulder = obtener_y_primer_pixel(int(gw * 0.78))
         shoulder_y_offset = (y_left_shoulder + y_right_shoulder) // 2
 
-        # 3. Determinación de proporciones anatómicas según categoría y foto
+        # 3. Determinación de proporciones anatómicas según categoría (Escala completa a hombros)
         ratio = u_w / u_h
         es_foto_retrato = ratio > 0.60
 
         nom_lower = (prenda_nombre or "").lower()
         if any(w in nom_lower for w in ["chaqueta", "abrig", "chamara", "coat"]):
-            factor_ancho = 0.68 if es_foto_retrato else 0.70
+            factor_ancho = 0.88 if es_foto_retrato else 0.90
         elif any(w in nom_lower for w in ["oversize", "chompa", "hoodie", "sudadera"]):
-            factor_ancho = 0.65 if es_foto_retrato else 0.67
+            factor_ancho = 0.86 if es_foto_retrato else 0.88
         else:
-            factor_ancho = 0.61 if es_foto_retrato else 0.64
+            factor_ancho = 0.84 if es_foto_retrato else 0.86
 
         torso_w = int(u_w * factor_ancho)
         aspect_garment = gh / max(gw, 1)
         torso_h = int(torso_w * aspect_garment)
 
-        max_h = int(u_h * 0.48)
+        max_h = int(u_h * 0.58)
         if torso_h > max_h:
             torso_h = max_h
             torso_w = int(torso_h / aspect_garment)
@@ -492,7 +495,7 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 
         # 4. Deformación anatómica trapezoidal (Shoulder Taper)
         w, h = garment_resized.size
-        taper_x = int(w * 0.035)
+        taper_x = int(w * 0.02)
         quad = (-taper_x, 0, 0, h, w, h, w + taper_x, 0)
         garment_warped = garment_resized.transform((w, h), Image.QUAD, quad, resample=Image.Resampling.BILINEAR)
 
@@ -501,15 +504,9 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
         alpha_blurred = alpha_ch.filter(ImageFilter.GaussianBlur(radius=1.2))
         garment_warped.putalpha(alpha_blurred)
 
-        # 5. Alineación precisa por línea de hombros
+        # 5. Alineación precisa por línea de hombros (Base del cuello)
         pos_x = (u_w - torso_w) // 2
-        # Para fotos verticales altas (retrato), los hombros están normalmente entre 0.44 y 0.48 de la altura total
-        if u_h > u_w * 1.2:
-            target_shoulder_y = int(u_h * 0.46)
-        elif es_foto_retrato:
-            target_shoulder_y = int(u_h * 0.35)
-        else:
-            target_shoulder_y = int(u_h * 0.25)
+        target_shoulder_y = int(u_h * (0.18 if es_foto_retrato else 0.22))
 
         scaled_shoulder_offset = int(shoulder_y_offset * (torso_h / gh))
         pos_y = target_shoulder_y - scaled_shoulder_offset
