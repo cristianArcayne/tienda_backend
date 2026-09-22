@@ -337,9 +337,9 @@ def _preprocesar_imagen_usuario(foto_bytes: bytes) -> bytes:
 
 
 def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: str) -> str:
-    """Fallback inteligente: superpone la prenda sobre la foto del usuario adaptándose a fotos parciales."""
+    """Fallback inteligente: elimina fondo blanco del JPG de la prenda, recorta bordes sobrantes y la coloca sobre los hombros."""
     try:
-        from PIL import Image, ImageOps, ImageEnhance, ImageFilter
+        from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageChops
         import io
 
         user_img = Image.open(io.BytesIO(foto_usuario_bytes))
@@ -368,33 +368,40 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
 
         garment_img = ImageOps.exif_transpose(garment_img).convert("RGBA")
 
-        # Detectar si la foto es parcial (solo cara/pecho) según el ratio
+        # 1. Eliminar recuadro blanco/claro del JPG de la prenda
+        threshold = 220
+        r, g, b, a = garment_img.split()
+        mask_r = r.point(lambda p: 0 if p > threshold else 255)
+        mask_g = g.point(lambda p: 0 if p > threshold else 255)
+        mask_b = b.point(lambda p: 0 if p > threshold else 255)
+        mask_combined = ImageChops.lighter(ImageChops.lighter(mask_r, mask_g), mask_b)
+        garment_img.putalpha(mask_combined)
+
+        # Recortar bordes transparentes sobrantes
+        bbox = garment_img.getbbox()
+        if bbox:
+            garment_img = garment_img.crop(bbox)
+
+        # 2. Calcular proporciones y posición de hombros
         ratio = u_w / u_h
-        es_foto_parcial = ratio > 0.65  # Fotos de cara/selfie suelen ser más cuadradas
+        es_foto_parcial = ratio > 0.65
 
         if es_foto_parcial:
-            # Para fotos de cara: prenda más pequeña, posición más arriba
-            torso_w = int(u_w * 0.55)
-            pos_y_factor = 0.50  # En la mitad inferior de la imagen
+            torso_w = int(u_w * 0.60)
+            pos_y_factor = 0.45
         else:
-            # Para fotos de cuerpo completo: prenda más grande, posición estándar
-            torso_w = int(u_w * 0.64)
-            pos_y_factor = 0.29
+            torso_w = int(u_w * 0.70)
+            pos_y_factor = 0.235
 
         aspect_garment = garment_img.height / max(garment_img.width, 1)
         torso_h = int(torso_w * aspect_garment)
 
-        max_h = int(u_h * 0.50)
+        max_h = int(u_h * 0.48)
         if torso_h > max_h:
             torso_h = max_h
             torso_w = int(torso_h / aspect_garment)
 
         garment_resized = garment_img.resize((torso_w, torso_h), Image.Resampling.LANCZOS)
-
-        # Hacer la prenda semi-transparente para un blend más suave
-        alpha = garment_resized.split()[3]
-        alpha = ImageEnhance.Brightness(alpha).enhance(0.88)
-        garment_resized.putalpha(alpha)
 
         pos_x = (u_w - torso_w) // 2
         pos_y = int(u_h * pos_y_factor)
@@ -403,7 +410,7 @@ def _generar_composite_fallback(foto_usuario_bytes: bytes, imagen_prenda_uri: st
         combined.paste(garment_resized, (pos_x, pos_y), garment_resized)
 
         out_buf = io.BytesIO()
-        combined.convert("RGB").save(out_buf, format="JPEG", quality=92)
+        combined.convert("RGB").save(out_buf, format="JPEG", quality=95)
         b64_out = base64.b64encode(out_buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_out}"
 
