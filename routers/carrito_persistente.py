@@ -157,3 +157,43 @@ def agregar_item_persistente(item_in: dict, db: Session = Depends(get_db)):
 
     db.commit()
     return {"success": True, "mensaje": "Producto añadido al carrito correctamente"}
+
+
+@router.delete(
+    "/vaciar",
+    summary="Vaciar carrito persistente activo"
+)
+@router.delete(
+    "",
+    summary="Vaciar carrito persistente activo",
+    include_in_schema=False
+)
+@router.delete(
+    "/",
+    summary="Vaciar carrito persistente activo",
+    include_in_schema=False
+)
+def vaciar_carrito_persistente(db: Session = Depends(get_db)):
+    carrito = db.query(CarritoCompra).first()
+    if carrito:
+        db.query(DetalleCarritoCompra).filter(
+            DetalleCarritoCompra.carrito_id == carrito.id
+        ).delete()
+        db.commit()
+    return {"success": True, "mensaje": "Carrito vaciado correctamente"}
+
+
+@router.delete(
+    "/items/{variante_id}",
+    summary="Eliminar item de carrito persistente"
+)
+def eliminar_item_persistente(variante_id: int, db: Session = Depends(get_db)):
+    carrito = db.query(CarritoCompra).first()
+    if carrito:
+        db.query(DetalleCarritoCompra).filter(
+            DetalleCarritoCompra.carrito_id == carrito.id,
+            DetalleCarritoCompra.variante_id == variante_id
+        ).delete()
+        db.commit()
+    return {"success": True, "mensaje": "Item eliminado correctamente"}
+
