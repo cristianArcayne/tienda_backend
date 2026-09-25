@@ -242,3 +242,4 @@ def responder_devolucion_admin(devolucion_id: int, body: ResponderDevolucionRequ
         "message": f"Devolución #{devolucion_id} fue {nuevo_estado} exitosamente.",
         "devolucion": _serializar_devolucion(dev)
     }
+

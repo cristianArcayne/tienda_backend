@@ -404,6 +404,29 @@ def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(
     return [_formatear_reserva(r) for r in reservas]
 
 
+def verificar_recordatorios_24h_reserva(db: Session):
+    try:
+        ahora = datetime.utcnow()
+        # Buscar reservas pendientes cuyo plazo venza dentro de 24 horas
+        proximas = db.query(Reserva).filter(
+            Reserva.estado == "PENDIENTE",
+            Reserva.fecha_limite > ahora,
+            Reserva.fecha_limite <= ahora + timedelta(hours=26)
+        ).all()
+
+        for r in proximas:
+            from routers.notificaciones import crear_notificacion_sistema
+            sucursal_nom = r.sucursal.nombre if r.sucursal else "la sucursal"
+            crear_notificacion_sistema(
+                db=db,
+                titulo=f"⏰ Recordatorio de Reserva #{r.id}",
+                mensaje=f"Mañana vence el plazo para recoger tu prenda en {sucursal_nom}. ¡Te esperamos!",
+                tipo="RESERVA"
+            )
+    except Exception as e:
+        print(f"[Reservas] Error en recordatorios 24h: {e}")
+
+
 @router.get(
     "/",
     response_model=List[ReservaResponse],
@@ -411,6 +434,7 @@ def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(
     description="Permite consultar el historial de reservas de la cadena."
 )
 def listar_reservas(db: Session = Depends(get_db)):
+    verificar_recordatorios_24h_reserva(db)
     reservas = db.query(Reserva).options(
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.talla),
