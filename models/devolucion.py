@@ -28,3 +28,4 @@ class Devolucion(Base):
     # Relaciones
     venta = relationship("Venta", backref="devolucion")
     cliente = relationship("Cliente", backref="devoluciones")
+

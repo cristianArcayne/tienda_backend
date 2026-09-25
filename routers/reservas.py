@@ -410,6 +410,11 @@ def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(
     summary="Listar todas las reservas Web-to-Store",
     description="Permite consultar el historial de reservas de la cadena."
 )
+@router.get(
+    "",
+    response_model=List[ReservaResponse],
+    include_in_schema=False
+)
 def listar_reservas(db: Session = Depends(get_db)):
     reservas = db.query(Reserva).options(
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
