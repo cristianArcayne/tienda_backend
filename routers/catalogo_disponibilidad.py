@@ -193,6 +193,19 @@ def consultar_catalogo_con_disponibilidad(
 
 
 @router.get(
+    "/{prenda_id}",
+    response_model=PrendaCatalogoDisponibilidadResponse,
+    summary="Obtener disponibilidad de una prenda específica por ID"
+)
+def obtener_disponibilidad_por_id(prenda_id: int, db: Session = Depends(get_db)):
+    res = consultar_catalogo_con_disponibilidad(db=db)
+    for p in res:
+        if p.id == prenda_id:
+            return p
+    raise HTTPException(status_code=404, detail=f"Prenda #{prenda_id} no encontrada en catálogo.")
+
+
+@router.get(
     "/prendas/{prenda_id}/disponibilidad-sucursales",
     response_model=SucursalStockDetalleResponse,
     summary="Mapa de disponibilidad física exacta de una prenda por sucursal",
@@ -269,6 +282,13 @@ for r in [router_compat]:
         methods=["GET"],
         response_model=List[PrendaCatalogoDisponibilidadResponse],
         summary="Consultar catálogo con stock omnicanal en tiempo real"
+    )
+    r.add_api_route(
+        "/{prenda_id}",
+        obtener_disponibilidad_por_id,
+        methods=["GET"],
+        response_model=PrendaCatalogoDisponibilidadResponse,
+        summary="Obtener disponibilidad de una prenda específica por ID"
     )
     r.add_api_route(
         "/prendas/{prenda_id}/disponibilidad-sucursales",

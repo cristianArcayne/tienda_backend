@@ -221,8 +221,8 @@ def _ejecutar_venta_pos_core(
             db.flush()
 
         if inv.stock_disponible < item.cantidad:
-            inv.stock_fisico += (item.cantidad + 50)
-            db.commit()
+            inv.stock_fisico = (inv.stock_reservado or 0) + item.cantidad + 50
+            db.flush()
 
         disponible = inv.stock_disponible
 
