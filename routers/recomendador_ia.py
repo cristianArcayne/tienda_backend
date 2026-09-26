@@ -57,23 +57,40 @@ def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db))
     if request.ropa_principal_id:
         prenda_base = db.query(Ropa).options(joinedload(Ropa.categoria)).filter(Ropa.id == request.ropa_principal_id).first()
 
-    # Si no se especificó prenda, analizar historial de compras/reservas del cliente
+    # Si no se especificó prenda, analizar historial de compras, favoritos y reservas del cliente
     if not prenda_base and cliente_str:
-        # Buscar última venta del cliente
+        ci_targets = [cliente_str]
+        usuario_obj = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(cliente_str)).first()
+        if not usuario_obj and cliente_str.isdigit():
+            usuario_obj = db.query(Usuario).filter(Usuario.id == int(cliente_str)).first()
+        if usuario_obj and usuario_obj.persona_ci:
+            ci_targets.append(usuario_obj.persona_ci)
+
+        # 1. Buscar en historial de compras
         ultima_venta = db.query(Venta).options(
             joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria)
-        ).filter(Venta.cliente_id == cliente_str).order_by(Venta.id.desc()).first()
+        ).filter(Venta.cliente_id.in_(ci_targets)).order_by(Venta.id.desc()).first()
 
         if ultima_venta and ultima_venta.detalles:
             prenda_base = ultima_venta.detalles[0].variante.ropa if (ultima_venta.detalles[0].variante and ultima_venta.detalles[0].variante.ropa) else None
             if prenda_base:
                 motivo_eje = f"Inspirado en tu última compra de {prenda_base.nombre}"
 
-        # Si no hay ventas, buscar reservas
+        # 2. Si no hay compras, buscar en favoritos
+        if not prenda_base and usuario_obj:
+            from models.catalogo import Favorito
+            ultimo_fav = db.query(Favorito).options(
+                joinedload(Favorito.ropa).joinedload(Ropa.categoria)
+            ).filter(Favorito.usuario_id == usuario_obj.id).order_by(Favorito.creado_en.desc()).first()
+            if ultimo_fav and ultimo_fav.ropa:
+                prenda_base = ultimo_fav.ropa
+                motivo_eje = f"Inspirado en tus favoritos ({prenda_base.nombre})"
+
+        # 3. Si no hay favoritos, buscar en reservas
         if not prenda_base:
             ultima_reserva = db.query(Reserva).options(
                 joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria)
-            ).filter(Reserva.cliente_id == cliente_str).order_by(Reserva.id.desc()).first()
+            ).filter(Reserva.cliente_id.in_(ci_targets)).order_by(Reserva.id.desc()).first()
             if ultima_reserva and ultima_reserva.detalles:
                 prenda_base = ultima_reserva.detalles[0].variante.ropa if (ultima_reserva.detalles[0].variante and ultima_reserva.detalles[0].variante.ropa) else None
                 if prenda_base:

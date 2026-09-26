@@ -197,9 +197,18 @@ def consultar_catalogo_con_disponibilidad(
     response_model=PrendaCatalogoDisponibilidadResponse,
     summary="Obtener disponibilidad de una prenda específica por ID"
 )
+@router.get(
+    "/{prenda_id}/",
+    response_model=PrendaCatalogoDisponibilidadResponse,
+    include_in_schema=False
+)
 def obtener_disponibilidad_por_id(prenda_id: int, db: Session = Depends(get_db)):
     res = consultar_catalogo_con_disponibilidad(db=db)
     for p in res:
+        if p.id == prenda_id:
+            return p
+    res_direct = consultar_catalogo_con_disponibilidad(solo_con_stock=False, db=db)
+    for p in res_direct:
         if p.id == prenda_id:
             return p
     raise HTTPException(status_code=404, detail=f"Prenda #{prenda_id} no encontrada en catálogo.")

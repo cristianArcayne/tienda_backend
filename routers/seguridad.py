@@ -445,6 +445,18 @@ def cambiar_contrasena(req: CambiarContrasenaRequest, db: Session = Depends(get_
 # ENDPOINTS FAVORITOS (LISTAR, AGREGAR Y ELIMINAR)
 # =========================================================================
 
+def _resolver_usuario_id(db: Session, user_val: Any) -> Optional[int]:
+    if not user_val:
+        return None
+    val_str = str(user_val).strip()
+    if val_str.isdigit():
+        return int(val_str)
+    u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(val_str)).first()
+    if u:
+        return u.id
+    return None
+
+
 @router.get("/api/favoritos")
 @router.get("/api/favoritos/")
 @router.get("/api/v1/favoritos")
@@ -454,10 +466,15 @@ def listar_favoritos(
     page_size: int = 100,
     categoria: Optional[int] = None,
     marca: Optional[int] = None,
+    usuario_id: Optional[str] = Query(None),
+    cliente_id: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     try:
         query = db.query(Favorito).join(Ropa, Favorito.ropa_id == Ropa.id)
+        target_uid = _resolver_usuario_id(db, usuario_id or cliente_id)
+        if target_uid:
+            query = query.filter(Favorito.usuario_id == target_uid)
         if categoria:
             query = query.filter(Ropa.categoria_id == categoria)
         
@@ -501,12 +518,14 @@ def agregar_favorito(req: dict, db: Session = Depends(get_db)):
     if not ropa:
         raise HTTPException(status_code=404, detail="Prenda no encontrada")
     
-    # Verificar si ya está en favoritos
-    existente = db.query(Favorito).filter(Favorito.ropa_id == ropa.id).first()
+    target_uid = _resolver_usuario_id(db, req.get("usuario_id") or req.get("cliente_id")) or 1
+    
+    # Verificar si ya está en favoritos de este usuario
+    existente = db.query(Favorito).filter(Favorito.ropa_id == ropa.id, Favorito.usuario_id == target_uid).first()
     if existente:
         return {
             "id": existente.id,
-            "usuario": existente.usuario_id or 1,
+            "usuario": existente.usuario_id or target_uid,
             "producto_id": ropa.id,
             "producto_nombre": ropa.nombre,
             "producto_precio": float(ropa.precio),
@@ -514,7 +533,7 @@ def agregar_favorito(req: dict, db: Session = Depends(get_db)):
             "creado_en": existente.creado_en.isoformat() if existente.creado_en else datetime.utcnow().isoformat()
         }
     
-    nuevo_fav = Favorito(ropa_id=ropa.id, usuario_id=1, creado_en=datetime.utcnow())
+    nuevo_fav = Favorito(ropa_id=ropa.id, usuario_id=target_uid, creado_en=datetime.utcnow())
     db.add(nuevo_fav)
     db.commit()
     db.refresh(nuevo_fav)
@@ -525,7 +544,7 @@ def agregar_favorito(req: dict, db: Session = Depends(get_db)):
         "previous": None,
         "results": [],
         "id": nuevo_fav.id,
-        "usuario": nuevo_fav.usuario_id or 1,
+        "usuario": nuevo_fav.usuario_id or target_uid,
         "producto_id": ropa.id,
         "producto_nombre": ropa.nombre,
         "producto_precio": float(ropa.precio),
@@ -538,11 +557,14 @@ def agregar_favorito(req: dict, db: Session = Depends(get_db)):
 @router.delete("/api/favoritos/{fav_id}/")
 @router.delete("/api/v1/favoritos/{fav_id}")
 @router.delete("/api/v1/favoritos/{fav_id}/")
-def eliminar_favorito(fav_id: int, db: Session = Depends(get_db)):
-    fav = db.query(Favorito).filter(Favorito.id == fav_id).first()
+def eliminar_favorito(fav_id: int, usuario_id: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    target_uid = _resolver_usuario_id(db, usuario_id)
+    query = db.query(Favorito)
+    if target_uid:
+        query = query.filter(Favorito.usuario_id == target_uid)
+    fav = query.filter(Favorito.id == fav_id).first()
     if not fav:
-        # Intentar también por ropa_id para máxima compatibilidad
-        fav = db.query(Favorito).filter(Favorito.ropa_id == fav_id).first()
+        fav = query.filter(Favorito.ropa_id == fav_id).first()
     
     if fav:
         db.delete(fav)

@@ -120,6 +120,77 @@ def _formatear_venta(venta: Venta) -> VentaResponse:
     )
 
 
+def _resolver_o_crear_cliente(db: Session, cliente_input: Optional[str], razon_social: Optional[str] = None) -> Cliente:
+    identificador = str(cliente_input).strip() if cliente_input else None
+    if not identificador or identificador.lower() in ["0", "null", "undefined", "anonymous", "guest", "default"]:
+        cli = db.query(Cliente).first()
+        if cli:
+            return cli
+        cli = Cliente(ci="2001", nombre="Cliente", apellido_pat="General", tipo_persona="CLIENTE")
+        db.add(cli)
+        db.flush()
+        return cli
+
+    # 1. Buscar en Cliente por CI directo
+    cliente = db.query(Cliente).filter(Cliente.ci == identificador).first()
+    if cliente:
+        return cliente
+
+    # 2. Buscar en Usuario por nombre_usuario o id
+    u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(identificador)).first()
+    if not u and identificador.isdigit():
+        u = db.query(Usuario).filter(Usuario.id == int(identificador)).first()
+
+    if u and u.persona_ci:
+        cliente = db.query(Cliente).filter(Cliente.ci == u.persona_ci).first()
+        if cliente:
+            return cliente
+        persona = db.query(Persona).filter(Persona.ci == u.persona_ci).first()
+        if persona:
+            cliente = Cliente(
+                ci=persona.ci,
+                nombre=persona.nombre,
+                apellido_pat=persona.apellido_pat,
+                apellido_mat=persona.apellido_mat,
+                correo=persona.correo,
+                telefono=persona.telefono,
+                tipo_persona="CLIENTE"
+            )
+            db.add(cliente)
+            db.flush()
+            return cliente
+
+    # 3. Buscar en Persona por CI
+    persona = db.query(Persona).filter(Persona.ci == identificador).first()
+    if persona:
+        cliente = Cliente(
+            ci=persona.ci,
+            nombre=persona.nombre,
+            apellido_pat=persona.apellido_pat,
+            apellido_mat=persona.apellido_mat,
+            correo=persona.correo,
+            telefono=persona.telefono,
+            tipo_persona="CLIENTE"
+        )
+        db.add(cliente)
+        db.flush()
+        return cliente
+
+    # 4. Crear cliente específico para este identificador único
+    nom_disp = razon_social if (razon_social and razon_social not in ["Sin Nombre", "Consumidor Final", "0"]) else identificador.capitalize()
+    partes = nom_disp.split(" ", 1)
+    cliente = Cliente(
+        ci=identificador,
+        nombre=partes[0],
+        apellido_pat=partes[1] if len(partes) > 1 else "Cliente",
+        correo=f"{identificador.lower().replace(' ', '_')}@fashionstore.bo",
+        tipo_persona="CLIENTE"
+    )
+    db.add(cliente)
+    db.flush()
+    return cliente
+
+
 def _ejecutar_venta_pos_core(
     db: Session,
     sucursal_id: int,
@@ -145,40 +216,8 @@ def _ejecutar_venta_pos_core(
     if not empleado:
         empleado = db.query(Empleado).first()
 
-    # 3. Validar cliente (o consumidor final o registrar nuevo cliente al vuelo)
-    cliente = None
-    if cliente_ci and str(cliente_ci).strip() not in ["0", "null", "undefined", "anonymous", ""]:
-        ci_clean = str(cliente_ci).strip()
-        cliente = db.query(Cliente).filter(Cliente.ci == ci_clean).first()
-        if not cliente:
-            persona = db.query(Persona).filter(Persona.ci == ci_clean).first()
-            if persona:
-                cliente = Cliente(
-                    ci=persona.ci,
-                    nombre=persona.nombre,
-                    apellido_pat=persona.apellido_pat,
-                    apellido_mat=persona.apellido_mat,
-                    correo=persona.correo,
-                    telefono=persona.telefono,
-                    tipo_persona="CLIENTE"
-                )
-                db.add(cliente)
-                db.flush()
-            else:
-                # Registra nuevo cliente al vuelo en la base de datos
-                nom_disp = razon_social if (razon_social and razon_social not in ["Sin Nombre", "Consumidor Final", "0"]) else ci_clean
-                partes = nom_disp.split(" ", 1)
-                nom_cli = partes[0]
-                ape_cli = partes[1] if len(partes) > 1 else ""
-                cliente = Cliente(
-                    ci=ci_clean,
-                    nombre=nom_cli,
-                    apellido_pat=ape_cli,
-                    correo=f"cliente_{ci_clean.lower().replace(' ', '_')}@fashionstore.bo",
-                    tipo_persona="CLIENTE"
-                )
-                db.add(cliente)
-                db.flush()
+    # 3. Validar cliente (usar resolución omnicanal estricta)
+    cliente = _resolver_o_crear_cliente(db=db, cliente_input=cliente_ci, razon_social=razon_social)
 
     # 4. Tipo de Venta
     if not tipo_venta_id:
@@ -322,10 +361,11 @@ def _ejecutar_venta_pos_core(
     try:
         from routers.notificaciones import crear_notificacion_sistema
         tipo_nombre = "E-commerce" if tipo_venta_id == 2 else "POS Tienda"
+        monto_str = f"{(nueva_venta.monto_neto or nueva_venta.total or 0.0):.2f}"
         crear_notificacion_sistema(
             db=db,
             titulo=f"🛍️ Compra Confirmada #{nueva_venta.id}",
-            mensaje=f"Tu compra ({tipo_nombre}) por Bs. {nueva_venta.total_final:.2f} ha sido procesada con éxito.",
+            mensaje=f"Tu compra ({tipo_nombre}) por Bs. {monto_str} ha sido procesada con éxito.",
             tipo="COMPRA"
         )
     except Exception as e:
@@ -387,20 +427,7 @@ def procesar_venta_pos(venta_in: VentaPOSCreate, db: Session = Depends(get_db)):
 )
 @router.post("/ecommerce/", response_model=VentaResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depends(get_db)):
-    cliente_str = str(venta_in.cliente_id).strip() if venta_in.cliente_id else "2001"
-    cliente = db.query(Cliente).filter(Cliente.ci == cliente_str).first()
-    if not cliente:
-        persona = db.query(Persona).filter(Persona.ci == cliente_str).first()
-        if persona:
-            cliente = Cliente(ci=persona.ci, nombre=persona.nombre, apellido_pat=persona.apellido_pat, correo=persona.correo, tipo_persona="CLIENTE")
-            db.add(cliente)
-            db.flush()
-        else:
-            cliente = db.query(Cliente).first()
-            if not cliente:
-                cliente = Cliente(ci=cliente_str, nombre="Cliente", apellido_pat="Tienda", correo="cliente@fashionstore.com", tipo_persona="CLIENTE")
-                db.add(cliente)
-                db.flush()
+    cliente = _resolver_o_crear_cliente(db=db, cliente_input=venta_in.cliente_id, razon_social=venta_in.razon_social)
 
     tipo_ecom = db.query(TipoVenta).filter(TipoVenta.nombre.ilike("%Digital%")).first()
     tipo_venta_id = tipo_ecom.id if tipo_ecom else 2
@@ -514,14 +541,14 @@ def listar_tipos_venta(db: Session = Depends(get_db)):
 
 
 @router.get(
-    "/",
-    response_model=List[VentaResponse],
-    summary="Historial general de ventas"
-)
-@router.get(
     "/mis-ventas",
     response_model=List[VentaResponse],
     summary="Listar historial de ventas del cliente autenticado"
+)
+@router.get(
+    "/mis-ventas/",
+    response_model=List[VentaResponse],
+    include_in_schema=False
 )
 def listar_mis_ventas(
     cliente_ci: Optional[str] = Query(None, description="CI o username del cliente"),

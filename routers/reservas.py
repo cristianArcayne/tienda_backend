@@ -386,7 +386,12 @@ def cancelar_reserva(reserva_id: int, db: Session = Depends(get_db)):
     response_model=List[ReservaResponse],
     summary="Listar reservas del cliente"
 )
-def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(get_db)):
+@router.get(
+    "/mis-reservas/",
+    response_model=List[ReservaResponse],
+    include_in_schema=False
+)
+def listar_mis_reservas(cliente_ci: Optional[str] = Query(None), db: Session = Depends(get_db)):
     query = db.query(Reserva).options(
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.talla),
@@ -394,12 +399,13 @@ def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(
         joinedload(Reserva.sucursal),
         joinedload(Reserva.cliente)
     )
-    if cliente_ci:
-        u = db.query(Usuario).filter(Usuario.nombre_usuario == cliente_ci).first()
-        if not u and cliente_ci.isdigit():
-            u = db.query(Usuario).filter(Usuario.id == int(cliente_ci)).first()
-        ci_target = u.persona_ci if (u and u.persona_ci) else cliente_ci
-        query = query.filter((Reserva.cliente_id == ci_target) | (Reserva.cliente_id == cliente_ci))
+    if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
+        ci_str = str(cliente_ci).strip()
+        u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_str)).first()
+        if not u and ci_str.isdigit():
+            u = db.query(Usuario).filter(Usuario.id == int(ci_str)).first()
+        ci_target = u.persona_ci if (u and u.persona_ci) else ci_str
+        query = query.filter((Reserva.cliente_id == ci_target) | (Reserva.cliente_id == ci_str))
     reservas = query.order_by(Reserva.id.desc()).all()
     return [_formatear_reserva(r) for r in reservas]
 
@@ -410,15 +416,23 @@ def listar_mis_reservas(cliente_ci: Optional[str] = None, db: Session = Depends(
     summary="Listar todas las reservas Web-to-Store",
     description="Permite consultar el historial de reservas de la cadena."
 )
-def listar_reservas(db: Session = Depends(get_db)):
-    reservas = db.query(Reserva).options(
+def listar_reservas(cliente_ci: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    query = db.query(Reserva).options(
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.talla),
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.color),
         joinedload(Reserva.sucursal),
         joinedload(Reserva.cliente)
-    ).order_by(Reserva.id.desc()).all()
+    )
+    if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
+        ci_str = str(cliente_ci).strip()
+        u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_str)).first()
+        if not u and ci_str.isdigit():
+            u = db.query(Usuario).filter(Usuario.id == int(ci_str)).first()
+        ci_target = u.persona_ci if (u and u.persona_ci) else ci_str
+        query = query.filter((Reserva.cliente_id == ci_target) | (Reserva.cliente_id == ci_str))
 
+    reservas = query.order_by(Reserva.id.desc()).all()
     return [_formatear_reserva(r) for r in reservas]
 
 
