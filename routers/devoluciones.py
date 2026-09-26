@@ -28,7 +28,6 @@ router_compat = APIRouter(
 class SolicitudDevolucionCreate(BaseModel):
     venta_id: int
     motivo: str = Field(..., min_length=5, description="Motivo detallado de la devolución")
-    cuenta_bancaria_qr: Optional[str] = None
 
 
 class ResponderDevolucionRequest(BaseModel):
@@ -130,14 +129,10 @@ def solicitar_devolucion(body: SolicitudDevolucionCreate, db: Session = Depends(
         )
 
     # Crear la solicitud
-    motivo_texto = body.motivo.strip()
-    if body.cuenta_bancaria_qr and body.cuenta_bancaria_qr.strip():
-        motivo_texto += f" | Cuenta/QR: {body.cuenta_bancaria_qr.strip()}"
-
     nueva_dev = Devolucion(
         venta_id=venta.id,
         cliente_id=venta.cliente_id,
-        motivo=motivo_texto,
+        motivo=body.motivo.strip(),
         estado="SOLICITADA",
         fecha_solicitud=datetime.utcnow(),
         monto_reembolso=venta.total

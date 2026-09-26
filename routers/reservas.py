@@ -157,20 +157,19 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
             InventarioSucursal.variante_id == item.variante_id
         ).with_for_update().first()
 
-        if not inv:
-            inv = InventarioSucursal(
-                sucursal_id=reserva_in.sucursal_id,
-                variante_id=item.variante_id,
-                stock_fisico=15,
-                stock_reservado=0
-            )
-            db.add(inv)
-            db.flush()
-
         disponible = inv.stock_disponible if inv else 0
-        if disponible < item.cantidad:
-            inv.stock_fisico += item.cantidad + 10
-            db.flush()
+        if not inv or disponible < item.cantidad:
+            # Buscar sucursales alternativas
+            todas_otras = db.query(InventarioSucursal).filter(
+                InventarioSucursal.variante_id == item.variante_id,
+                InventarioSucursal.sucursal_id != reserva_in.sucursal_id
+            ).all()
+            otras = [o for o in todas_otras if o.stock_disponible >= item.cantidad]
+            sug = [f"Sucursal ID {o.sucursal_id} ({o.stock_disponible} disponibles)" for o in otras]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Excepción A1: Stock insuficiente en {sucursal.nombre}. Disponibles: {disponible}. Sugerencias: {', '.join(sug) if sug else 'Sin stock en otras tiendas'}."
+            )
 
         inv.stock_reservado += item.cantidad
 
