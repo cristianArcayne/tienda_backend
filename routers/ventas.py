@@ -518,8 +518,47 @@ def listar_tipos_venta(db: Session = Depends(get_db)):
     response_model=List[VentaResponse],
     summary="Historial general de ventas"
 )
+@router.get(
+    "/mis-ventas",
+    response_model=List[VentaResponse],
+    summary="Listar historial de ventas del cliente autenticado"
+)
+def listar_mis_ventas(
+    cliente_ci: Optional[str] = Query(None, description="CI o username del cliente"),
+    db: Session = Depends(get_db)
+):
+    query = db.query(Venta).options(
+        joinedload(Venta.sucursal),
+        joinedload(Venta.empleado),
+        joinedload(Venta.cliente),
+        joinedload(Venta.metodo_pago),
+        joinedload(Venta.tipo_venta),
+        joinedload(Venta.factura),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.talla),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
+    )
+
+    if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
+        ci_target = str(cliente_ci).strip()
+        u = db.query(Usuario).filter(Usuario.nombre_usuario == ci_target).first()
+        if not u and ci_target.isdigit():
+            u = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
+        ci_real = u.persona_ci if (u and u.persona_ci) else ci_target
+        query = query.filter(or_(Venta.cliente_id == ci_real, Venta.cliente_id == ci_target))
+
+    ventas = query.order_by(Venta.id.desc()).all()
+    return [_formatear_venta(v) for v in ventas]
+
+
+@router.get(
+    "/",
+    response_model=List[VentaResponse],
+    summary="Historial general de ventas"
+)
 def listar_ventas(
     sucursal_id: Optional[int] = Query(None, description="Filtrar por ID de sucursal física"),
+    cliente_ci: Optional[str] = Query(None, description="Filtrar por CI o username del cliente"),
     db: Session = Depends(get_db)
 ):
     query = db.query(Venta).options(
@@ -536,6 +575,14 @@ def listar_ventas(
 
     if isinstance(sucursal_id, (int, float)) or (isinstance(sucursal_id, str) and sucursal_id.isdigit()):
         query = query.filter(Venta.sucursal_id == int(sucursal_id))
+
+    if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
+        ci_target = str(cliente_ci).strip()
+        u = db.query(Usuario).filter(Usuario.nombre_usuario == ci_target).first()
+        if not u and ci_target.isdigit():
+            u = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
+        ci_real = u.persona_ci if (u and u.persona_ci) else ci_target
+        query = query.filter(or_(Venta.cliente_id == ci_real, Venta.cliente_id == ci_target))
 
     ventas = query.order_by(Venta.id.desc()).all()
     return [_formatear_venta(v) for v in ventas]
