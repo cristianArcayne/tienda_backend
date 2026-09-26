@@ -18,6 +18,7 @@ class DetalleReservaResponse(BaseModel):
     cantidad: int
     cod_barra: Optional[str] = None
     prenda_nombre: Optional[str] = None
+    imagen_url: Optional[str] = None
     talla: Optional[str] = None
     color: Optional[str] = None
     precio_unitario: Optional[float] = None
