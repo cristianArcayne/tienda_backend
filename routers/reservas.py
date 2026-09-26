@@ -186,7 +186,7 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
     db.add(nueva_reserva)
     db.flush()
 
-    for item in reserva_in.detalles:
+    for item in detalles_list:
         var = db.query(VariantePrenda).options(joinedload(VariantePrenda.ropa)).filter(VariantePrenda.id == item.variante_id).first()
         precio_un = float(var.ropa.precio) if (var and var.ropa) else 0.0
         det = DetalleReserva(
@@ -195,6 +195,7 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
             cantidad=item.cantidad,
             precio_unitario=precio_un
         )
+        db.add(det)
     db.commit()
 
     try:
