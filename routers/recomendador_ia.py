@@ -10,7 +10,7 @@ from datetime import datetime
 
 from database import get_db
 from models.catalogo import Ropa, Categoria, VariantePrenda
-from models.seguridad_persona import Cliente
+from models.seguridad_persona import Cliente, Usuario
 from models.innovacion import RecomendacionIA
 from models.venta import Venta, DetalleVenta
 from models.reserva import Reserva, DetalleReserva

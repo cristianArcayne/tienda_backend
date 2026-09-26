@@ -4,7 +4,7 @@ Alineado fielmente con RESERVA, DETALLE_RESERVA, CLIENTE y SUCURSAL del Diagrama
 """
 from datetime import date, datetime, timedelta
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
