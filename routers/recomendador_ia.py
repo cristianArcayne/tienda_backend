@@ -1,6 +1,6 @@
 """
 Router para CU17: Interactuar con Recomendador Inteligente (IA).
-Generador de Outfits y venta cruzada basado en afinidad de estilos, historial de compras, favoritos y círculo cromático.
+Generador de Outfits y venta cruzada basado en afinidad de estilos, historial de compras y círculo cromático.
 """
 from typing import List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
 
 from database import get_db
-from models.catalogo import Ropa, Categoria, VariantePrenda, Favorito
+from models.catalogo import Ropa, Categoria, VariantePrenda
 from models.seguridad_persona import Cliente
 from models.innovacion import RecomendacionIA
 from models.venta import Venta, DetalleVenta
@@ -45,71 +45,39 @@ class OutfitACarritoRequest(BaseModel):
     response_model=OutfitRecomendadoResponse,
     status_code=status.HTTP_200_OK,
     summary="Generar combinación de outfit inteligente (Cross-Selling)",
-    description="Analiza la prenda principal, los FAVORITOS y el HISTORIAL DE COMPRAS del cliente para construir un conjunto estilístico armónico."
+    description="Analiza la prenda principal o el historial del cliente para construir un conjunto estilístico armónico con descuento por combo."
 )
 def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db)):
     cliente_str = str(request.cliente_id).strip() if request.cliente_id else None
-    u_id_val = int(cliente_str) if (cliente_str and cliente_str.isdigit()) else 0
-
+    
+    # 1. Determinar prenda base (especificada por usuario o inferida por historial)
     prenda_base = None
     motivo_eje = "Prenda eje principal del outfit"
-    fav_ids = set()
-    compra_ids = set()
 
-    # Obtener IDs de favoritos del cliente
-    if cliente_str:
-        fav_records = db.query(Favorito).options(joinedload(Favorito.ropa).joinedload(Ropa.categoria)).filter(
-            (Favorito.usuario_id == cliente_str) | (Favorito.usuario_id == u_id_val)
-        ).order_by(Favorito.creado_en.desc()).all()
-        fav_ids = {f.ropa_id for f in fav_records if f.ropa_id}
-
-        # Obtener IDs de prendas compradas en el historial del cliente
-        ventas_cli = db.query(Venta).options(
-            joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa)
-        ).filter(Venta.cliente_id == cliente_str).order_by(Venta.id.desc()).all()
-
-        for v in ventas_cli:
-            for dv in (v.detalles or []):
-                if dv.variante and dv.variante.ropa_id:
-                    compra_ids.add(dv.variante.ropa_id)
-
-    # 1. Determinar prenda base (especificada por usuario, o basada en Favoritos o Historial)
     if request.ropa_principal_id:
         prenda_base = db.query(Ropa).options(joinedload(Ropa.categoria)).filter(Ropa.id == request.ropa_principal_id).first()
 
-    # Prioridad A: Primera prenda de sus FAVORITOS
-    if not prenda_base and cliente_str and fav_ids:
-        fav_primero = db.query(Favorito).options(joinedload(Favorito.ropa).joinedload(Ropa.categoria)).filter(
-            (Favorito.usuario_id == cliente_str) | (Favorito.usuario_id == u_id_val)
-        ).order_by(Favorito.creado_en.desc()).first()
-        if fav_primero and fav_primero.ropa:
-            prenda_base = fav_primero.ropa
-            motivo_eje = f"⭐ Inspirado en tus prendas FAVORITAS ({prenda_base.nombre})"
-
-    # Prioridad B: Prenda de su HISTORIAL DE COMPRAS
-    if not prenda_base and cliente_str and compra_ids:
+    # Si no se especificó prenda, analizar historial de compras/reservas del cliente
+    if not prenda_base and cliente_str:
+        # Buscar última venta del cliente
         ultima_venta = db.query(Venta).options(
             joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria)
         ).filter(Venta.cliente_id == cliente_str).order_by(Venta.id.desc()).first()
 
         if ultima_venta and ultima_venta.detalles:
-            for dv in ultima_venta.detalles:
-                if dv.variante and dv.variante.ropa:
-                    prenda_base = dv.variante.ropa
-                    motivo_eje = f"🛍️ Inspirado en tu HISTORIAL DE COMPRAS ({prenda_base.nombre})"
-                    break
+            prenda_base = ultima_venta.detalles[0].variante.ropa if (ultima_venta.detalles[0].variante and ultima_venta.detalles[0].variante.ropa) else None
+            if prenda_base:
+                motivo_eje = f"Inspirado en tu última compra de {prenda_base.nombre}"
 
-    # Prioridad C: Prenda de sus RESERVAS
-    if not prenda_base and cliente_str:
-        ultima_reserva = db.query(Reserva).options(
-            joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria)
-        ).filter(Reserva.cliente_id == cliente_str).order_by(Reserva.id.desc()).first()
-        if ultima_reserva and ultima_reserva.detalles:
-            for dr in ultima_reserva.detalles:
-                if dr.variante and dr.variante.ropa:
-                    prenda_base = dr.variante.ropa
-                    motivo_eje = f"📌 Inspirado en tu RESERVA reciente ({prenda_base.nombre})"
-                    break
+        # Si no hay ventas, buscar reservas
+        if not prenda_base:
+            ultima_reserva = db.query(Reserva).options(
+                joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria)
+            ).filter(Reserva.cliente_id == cliente_str).order_by(Reserva.id.desc()).first()
+            if ultima_reserva and ultima_reserva.detalles:
+                prenda_base = ultima_reserva.detalles[0].variante.ropa if (ultima_reserva.detalles[0].variante and ultima_reserva.detalles[0].variante.ropa) else None
+                if prenda_base:
+                    motivo_eje = f"Inspirado en tu reserva reciente de {prenda_base.nombre}"
 
     # Fallback: primera prenda activa disponible en el catálogo
     if not prenda_base:
@@ -120,63 +88,20 @@ def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db))
     if not prenda_base:
         raise HTTPException(status_code=404, detail="No hay prendas disponibles en el catálogo para armar combinaciones.")
 
-    # 2. Seleccionar prendas complementarias priorizando FAVORITOS e HISTORIAL
-    candidatas: List[Ropa] = []
-    candidatas_ids = set()
+    # 2. Obtener prendas complementarias de categorías distintas para armar conjunto completo
+    categoria_base_id = prenda_base.categoria_id
+    complementarias_query = db.query(Ropa).options(joinedload(Ropa.categoria)).filter(
+        Ropa.id != prenda_base.id,
+        Ropa.activo == True
+    )
 
-    # A. De sus FAVORITOS (diferente a prenda_base)
-    if cliente_str and fav_ids:
-        favs_complementarios = db.query(Favorito).options(joinedload(Favorito.ropa).joinedload(Ropa.categoria)).filter(
-            (Favorito.usuario_id == cliente_str) | (Favorito.usuario_id == u_id_val),
-            Favorito.ropa_id != prenda_base.id
-        ).all()
+    if categoria_base_id:
+        complementarias_query = complementarias_query.filter(Ropa.categoria_id != categoria_base_id)
 
-        for f in favs_complementarios:
-            if f.ropa and f.ropa.activo and f.ropa.id not in candidatas_ids:
-                candidatas.append(f.ropa)
-                candidatas_ids.add(f.ropa.id)
-                if len(candidatas) >= 3:
-                    break
-
-    # B. De su HISTORIAL DE COMPRAS (diferente a prenda_base)
-    if len(candidatas) < 3 and cliente_str and compra_ids:
-        ventas_completas = db.query(Venta).options(
-            joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa).joinedload(Ropa.categoria)
-        ).filter(Venta.cliente_id == cliente_str).order_by(Venta.id.desc()).all()
-
-        for v in ventas_completas:
-            for dv in (v.detalles or []):
-                if dv.variante and dv.variante.ropa:
-                    r_cand = dv.variante.ropa
-                    if r_cand.id != prenda_base.id and r_cand.id not in candidatas_ids and r_cand.activo:
-                        candidatas.append(r_cand)
-                        candidatas_ids.add(r_cand.id)
-                        if len(candidatas) >= 3:
-                            break
-            if len(candidatas) >= 3:
-                break
-
-    # C. Completar con prendas del catálogo activo de categorías distintas
-    if len(candidatas) < 3:
-        existentes_ids = [prenda_base.id] + list(candidatas_ids)
-        faltantes = 3 - len(candidatas)
-
-        query_cat = db.query(Ropa).options(joinedload(Ropa.categoria)).filter(
-            ~Ropa.id.in_(existentes_ids),
-            Ropa.activo == True
-        )
-        if prenda_base.categoria_id:
-            query_cat = query_cat.filter(Ropa.categoria_id != prenda_base.categoria_id)
-
-        extras = query_cat.limit(faltantes).all()
-        if len(extras) < faltantes:
-            extras = db.query(Ropa).options(joinedload(Ropa.categoria)).filter(
-                ~Ropa.id.in_(existentes_ids),
-                Ropa.activo == True
-            ).limit(faltantes).all()
-
-        for ex in extras:
-            candidatas.append(ex)
+    candidatas = complementarias_query.limit(3).all()
+    if len(candidatas) < 2:
+        # Tomar cualquier otra prenda activa para completar el combo
+        candidatas = db.query(Ropa).options(joinedload(Ropa.categoria)).filter(Ropa.id != prenda_base.id).limit(3).all()
 
     # 3. Construir items sugeridos
     base_item = PrendaSugeridaItem(
@@ -196,15 +121,6 @@ def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db))
         p_precio = float(cand.precio)
         total_bruto += p_precio
         cat_nom = cand.categoria.nombre if cand.categoria else "Complemento"
-
-        # Motivo personalizado
-        if cand.id in fav_ids:
-            motivo_cand = f"⭐ Prenda de tus FAVORITOS para combinar ({cat_nom})"
-        elif cand.id in compra_ids:
-            motivo_cand = f"🛍️ Basado en tu HISTORIAL DE COMPRA ({cat_nom})"
-        else:
-            motivo_cand = f"✨ Combinación armónica de {cat_nom} recomendada por la IA"
-
         items_comp.append(
             PrendaSugeridaItem(
                 ropa_id=cand.id,
@@ -213,7 +129,7 @@ def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db))
                 precio=p_precio,
                 imagen_uri=cand.imagen_uri or "https://images.unsplash.com/photo-1521572267360-ee0c2909d518",
                 modelo_3d_uri=cand.modelo_3d_uri,
-                motivo_sugerencia=motivo_cand
+                motivo_sugerencia=f"Combinación armónica de {cat_nom} recomendada por el motor de estilo"
             )
         )
 
@@ -234,7 +150,7 @@ def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db))
                 ropa_principal_id=prenda_base.id,
                 outfit_nombre=outfit_nom,
                 prendas_sugeridas_ids=ids_sugeridos_str,
-                tipo_algoritmo="ESTILO_CRUZADO_HISTORIAL_FAVORITOS",
+                tipo_algoritmo="ESTILO_CRUZADO_HISTORIAL_CLIENTE",
                 score_afinidad=96.50,
                 aceptada=False
             )
@@ -245,10 +161,10 @@ def generar_outfit(request: GenerarOutfitRequest, db: Session = Depends(get_db))
     return OutfitRecomendadoResponse(
         id=rec_record.id if rec_record else 1,
         outfit_nombre=outfit_nom,
-        descripcion_estilo=f"Conjunto curado para ocasión {request.ocasion or 'Casual'} considerando tu historial de compras y prendas favoritas.",
+        descripcion_estilo=f"Conjunto curado para ocasión {request.ocasion or 'Casual'} con balance cromático y texturas de temporada.",
         ocasion=request.ocasion or "Casual",
         score_afinidad=96.50,
-        tipo_algoritmo="ESTILO_CRUZADO_HISTORIAL_FAVORITOS",
+        tipo_algoritmo="ESTILO_CRUZADO_HISTORIAL_CLIENTE",
         prenda_principal=base_item,
         prendas_complementarias=items_comp,
         precio_total_outfit=round(total_bruto, 2),
@@ -316,7 +232,7 @@ def agregar_outfit_a_carrito(body: OutfitACarritoRequest, db: Session = Depends(
     "/sugerencias-cliente/{cliente_ci}",
     response_model=List[OutfitRecomendadoResponse],
     summary="Obtener sugerencias personalizadas para un cliente",
-    description="Consulta las recomendaciones generadas por IA basadas en Favoritos e Historial del cliente."
+    description="Consulta las recomendaciones generadas por IA basadas en el historial del cliente."
 )
 def listar_sugerencias_cliente(cliente_ci: Union[str, int], db: Session = Depends(get_db)):
     cliente_str = str(cliente_ci).strip()
@@ -608,3 +524,5 @@ def reentrenar_modelos_ia(db: Session = Depends(get_db)):
         "random_forest": {"registros_usados": registros},
         "prophet": {"registros_usados": registros}
     }
+
+
