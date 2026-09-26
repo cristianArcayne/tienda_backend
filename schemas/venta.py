@@ -52,6 +52,7 @@ class DetalleVentaResponse(BaseModel):
     prenda_nombre: Optional[str] = None
     talla: Optional[str] = None
     color: Optional[str] = None
+    imagen_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

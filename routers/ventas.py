@@ -66,7 +66,8 @@ def _formatear_venta(venta: Venta) -> VentaResponse:
             cod_barra=d.variante.cod_barra if d.variante else None,
             prenda_nombre=d.variante.ropa.nombre if (d.variante and d.variante.ropa) else None,
             talla=d.variante.talla.medida if (d.variante and d.variante.talla) else "Única",
-            color=d.variante.color.nombre if (d.variante and d.variante.color) else "Estándar"
+            color=d.variante.color.nombre if (d.variante and d.variante.color) else "Estándar",
+            imagen_url=d.variante.ropa.imagen_principal if (d.variante and d.variante.ropa) else None
         )
         for d in (venta.detalles or [])
     ]
