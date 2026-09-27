@@ -13,6 +13,7 @@ from database import get_db
 from models.venta import Venta, DetalleVenta
 from models.catalogo import VariantePrenda, Ropa, Talla, Color
 from models.devolucion import Devolucion
+from models.notificacion import SuscripcionPushModel
 from routers.notificaciones import crear_notificacion_sistema
 
 router = APIRouter(
@@ -281,6 +282,12 @@ def solicitar_devolucion(body: SolicitudDevolucionCreate, db: Session = Depends(
             tipo="DEVOLUCION",
             datos_adicionales=datos_extra
         )
+        # Sincronizar timestamp de notificaciones para navegadores activos
+        activas = db.query(SuscripcionPushModel).filter(SuscripcionPushModel.activa == True).all()
+        ahora_push = datetime.utcnow()
+        for s in activas:
+            s.ultimo_envio = ahora_push
+        db.commit()
     except Exception as e:
         print(f"[Devoluciones] Error enviando notificación: {e}")
 
@@ -333,6 +340,22 @@ def listar_devoluciones_admin(estado: Optional[str] = None, db: Session = Depend
 
     devoluciones = query.order_by(Devolucion.fecha_solicitud.desc()).all()
     return [_serializar_devolucion(d) for d in devoluciones]
+
+
+@router.get("/admin/pendientes-count")
+@router.get("/admin/pendientes-count/", include_in_schema=False)
+@router_compat.get("/admin/pendientes-count")
+@router_compat.get("/admin/pendientes-count/", include_in_schema=False)
+@router_api_compat.get("/admin/pendientes-count", include_in_schema=False)
+@router_api_compat.get("/admin/pendientes-count/", include_in_schema=False)
+def obtener_conteo_pendientes_admin(db: Session = Depends(get_db)):
+    """
+    Retorna el número de solicitudes de reembolso pendientes de atención para el badge de administración.
+    """
+    count = db.query(Devolucion).filter(
+        Devolucion.estado.in_(["SOLICITADA", "PENDIENTE", "EN_REVISION"])
+    ).count()
+    return {"count": count, "pendientes": count}
 
 
 @router.put("/admin/{devolucion_id}/responder")
