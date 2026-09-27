@@ -54,6 +54,7 @@ from routers.notificaciones import router as notificaciones_router, compat_route
 from routers.suscripciones import router as suscripciones_router
 from routers.sugerencias_compra import router as sugerencias_compra_router
 from routers.devoluciones import router as devoluciones_router, router_compat as devoluciones_compat_router, router_api_compat as devoluciones_api_compat_router
+from routers.stripe_pagos import router as stripe_pagos_router, router_compat as stripe_pagos_compat_router
 
 # Crear tablas en base de datos si no existen
 Base.metadata.create_all(bind=engine)
@@ -158,6 +159,8 @@ app.include_router(sugerencias_compra_router)
 app.include_router(devoluciones_router)
 app.include_router(devoluciones_compat_router)
 app.include_router(devoluciones_api_compat_router)
+app.include_router(stripe_pagos_router)
+app.include_router(stripe_pagos_compat_router)
 
 @app.get("/", tags=["Estado del Sistema"])
 def raiz():
