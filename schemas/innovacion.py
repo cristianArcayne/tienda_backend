@@ -59,6 +59,7 @@ class AjusteCorporalResponse(BaseModel):
 
 class PrendaSugeridaItem(BaseModel):
     ropa_id: int
+    id: Optional[int] = None  # Compatible con id o ropa_id para web y móvil
     nombre: str
     categoria: str
     precio: float
@@ -103,6 +104,7 @@ class ChatMessageRequest(BaseModel):
 class ChatMessageResponse(BaseModel):
     respuesta_texto: str
     outfit_recomendado: Optional[OutfitRecomendadoResponse] = None
+    prendas_sugeridas: Optional[List[PrendaSugeridaItem]] = []
 
 # =========================================================================
 # CU18: REPORTES MEDIANTE COMANDOS DE VOZ & ANALÍTICA
