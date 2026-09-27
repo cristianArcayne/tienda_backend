@@ -23,6 +23,11 @@ router = APIRouter(
     tags=["CU11. Consultar catálogo y disponibilidad en tiempo real"]
 )
 
+router_compat = APIRouter(
+    prefix="/api/catalogo-disponibilidad",
+    tags=["CU11. Consultar catálogo y disponibilidad en tiempo real (Compat)"]
+)
+
 
 def _calcular_estado_stock(disponible: int) -> str:
     if disponible > 5:
@@ -220,6 +225,13 @@ def obtener_disponibilidad_por_id(prenda_id: int, db: Session = Depends(get_db))
     summary="Mapa de disponibilidad física exacta de una prenda por sucursal",
     description="Permite al cliente ver las existencias exactas en cada tienda antes de visitar o reservar."
 )
+@router.get("/prendas/{prenda_id}/disponibilidad-sucursales/", response_model=SucursalStockDetalleResponse, include_in_schema=False)
+@router.get("/{prenda_id}/disponibilidad-sucursales", response_model=SucursalStockDetalleResponse, include_in_schema=False)
+@router.get("/{prenda_id}/disponibilidad-sucursales/", response_model=SucursalStockDetalleResponse, include_in_schema=False)
+@router_compat.get("/prendas/{prenda_id}/disponibilidad-sucursales", response_model=SucursalStockDetalleResponse, include_in_schema=False)
+@router_compat.get("/prendas/{prenda_id}/disponibilidad-sucursales/", response_model=SucursalStockDetalleResponse, include_in_schema=False)
+@router_compat.get("/{prenda_id}/disponibilidad-sucursales", response_model=SucursalStockDetalleResponse, include_in_schema=False)
+@router_compat.get("/{prenda_id}/disponibilidad-sucursales/", response_model=SucursalStockDetalleResponse, include_in_schema=False)
 def obtener_disponibilidad_prenda(prenda_id: int, db: Session = Depends(get_db)):
     prenda = db.query(Ropa).options(
         selectinload(Ropa.variantes).joinedload(VariantePrenda.talla),
@@ -277,12 +289,6 @@ def obtener_disponibilidad_prenda(prenda_id: int, db: Session = Depends(get_db))
         prenda_nombre=prenda.nombre,
         sucursales=lista_sucursales_resp
     )
-
-
-router_compat = APIRouter(
-    prefix="/api/catalogo-disponibilidad",
-    tags=["CU11. Consultar catálogo y disponibilidad en tiempo real (Compat)"]
-)
 
 for r in [router_compat]:
     r.add_api_route(

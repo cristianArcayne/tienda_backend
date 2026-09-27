@@ -42,6 +42,8 @@ class SolicitudDevolucionCreate(BaseModel):
 class ResponderDevolucionRequest(BaseModel):
     estado: str = Field(..., description="'APROBADA' o 'RECHAZADA'")
     respuesta_admin: Optional[str] = None
+    observacion: Optional[str] = None
+    observacion_admin: Optional[str] = None
 
 
 def _calcular_horas_transcurridas(fecha_inicio: Optional[datetime]) -> float:
@@ -112,6 +114,8 @@ def _serializar_devolucion(dev: Devolucion) -> dict:
         "fecha_solicitud": dev.fecha_solicitud.isoformat() if dev.fecha_solicitud else None,
         "fecha_respuesta": dev.fecha_respuesta.isoformat() if dev.fecha_respuesta else None,
         "respuesta_admin": dev.respuesta_admin,
+        "observacion_admin": dev.respuesta_admin,
+        "observacion": dev.respuesta_admin,
         "monto_reembolso": float(dev.monto_reembolso) if dev.monto_reembolso else (float(dev.venta.total) if dev.venta else 0.0),
         "horas_transcurridas": round(horas_transcurridas, 2),
         "es_elegible_24h": es_elegible_24h,
@@ -287,13 +291,18 @@ def solicitar_devolucion(body: SolicitudDevolucionCreate, db: Session = Depends(
 
 
 @router.get("/mis-devoluciones")
+@router.get("/mis-devoluciones/", include_in_schema=False)
 @router_compat.get("/mis-devoluciones")
+@router_compat.get("/mis-devoluciones/", include_in_schema=False)
+@router_api_compat.get("/mis-devoluciones", include_in_schema=False)
+@router_api_compat.get("/mis-devoluciones/", include_in_schema=False)
 def listar_mis_devoluciones(cliente_ci: Optional[str] = None, db: Session = Depends(get_db)):
     """
     Lista las solicitudes de devolución enviadas por los clientes.
     """
     query = db.query(Devolucion).options(
-        joinedload(Devolucion.venta).joinedload(Venta.cliente)
+        joinedload(Devolucion.venta).joinedload(Venta.cliente),
+        joinedload(Devolucion.venta).joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa)
     )
     if cliente_ci:
         query = query.filter(Devolucion.cliente_id == cliente_ci)
@@ -303,27 +312,35 @@ def listar_mis_devoluciones(cliente_ci: Optional[str] = None, db: Session = Depe
 
 
 @router.get("/admin/listar")
+@router.get("/admin/listar/", include_in_schema=False)
 @router_compat.get("/admin/listar")
+@router_compat.get("/admin/listar/", include_in_schema=False)
+@router_api_compat.get("/admin/listar", include_in_schema=False)
+@router_api_compat.get("/admin/listar/", include_in_schema=False)
 def listar_devoluciones_admin(estado: Optional[str] = None, db: Session = Depends(get_db)):
     """
     Lista general para el módulo de Administración y Gestión de Devoluciones (Web Dashboard).
     """
     query = db.query(Devolucion).options(
-        joinedload(Devolucion.venta).joinedload(Venta.cliente)
+        joinedload(Devolucion.venta).joinedload(Venta.cliente),
+        joinedload(Devolucion.venta).joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa),
+        joinedload(Devolucion.venta).joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.talla),
+        joinedload(Devolucion.venta).joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
     )
 
     if estado:
         query = query.filter(Devolucion.estado == estado.upper())
 
     devoluciones = query.order_by(Devolucion.fecha_solicitud.desc()).all()
-    return {
-        "total": len(devoluciones),
-        "results": [_serializar_devolucion(d) for d in devoluciones]
-    }
+    return [_serializar_devolucion(d) for d in devoluciones]
 
 
 @router.put("/admin/{devolucion_id}/responder")
+@router.put("/admin/{devolucion_id}/responder/", include_in_schema=False)
 @router_compat.put("/admin/{devolucion_id}/responder")
+@router_compat.put("/admin/{devolucion_id}/responder/", include_in_schema=False)
+@router_api_compat.put("/admin/{devolucion_id}/responder", include_in_schema=False)
+@router_api_compat.put("/admin/{devolucion_id}/responder/", include_in_schema=False)
 def responder_devolucion_admin(devolucion_id: int, body: ResponderDevolucionRequest, db: Session = Depends(get_db)):
     """
     Permite al Administrador/Personal Aprobar o Rechazar una solicitud de devolución.
@@ -338,7 +355,8 @@ def responder_devolucion_admin(devolucion_id: int, body: ResponderDevolucionRequ
 
     dev.estado = nuevo_estado
     dev.fecha_respuesta = datetime.utcnow()
-    dev.respuesta_admin = body.respuesta_admin.strip() if body.respuesta_admin else None
+    nota_admin = (body.respuesta_admin or body.observacion or body.observacion_admin or '').strip() or None
+    dev.respuesta_admin = nota_admin
 
     # Actualizar estado de la venta asociada
     if dev.venta:

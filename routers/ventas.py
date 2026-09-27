@@ -67,7 +67,7 @@ def _formatear_venta(venta: Venta) -> VentaResponse:
             prenda_nombre=d.variante.ropa.nombre if (d.variante and d.variante.ropa) else None,
             talla=d.variante.talla.medida if (d.variante and d.variante.talla) else "Única",
             color=d.variante.color.nombre if (d.variante and d.variante.color) else "Estándar",
-            imagen_url=(getattr(d.variante.ropa, 'imagen_uri', None) or getattr(d.variante.ropa, 'imagen_principal', None)) if (d.variante and d.variante.ropa) else None
+            imagen_url=d.variante.ropa.imagen_principal if (d.variante and d.variante.ropa) else None
         )
         for d in (venta.detalles or [])
     ]
@@ -202,8 +202,7 @@ def _ejecutar_venta_pos_core(
     razon_social: Optional[str] = "Sin Nombre",
     monto_recibido: Optional[float] = None,
     descuento_total: Optional[float] = 0.0,
-    tipo_venta_id: Optional[int] = None,
-    token_pasarela: Optional[str] = None
+    tipo_venta_id: Optional[int] = None
 ) -> Venta:
     # 1. Validar sucursal
     sucursal = db.query(Sucursal).filter(Sucursal.id == sucursal_id).first()
@@ -304,12 +303,8 @@ def _ejecutar_venta_pos_core(
 
     # 7. Registrar Venta
     ahora = datetime.now()
-    if token_pasarela and str(token_pasarela).strip():
-        prefijo_trx = "STRIPE" if "pi_" in str(token_pasarela).lower() else "TRX-ECOM"
-        codigo_trx = f"{prefijo_trx}-{str(token_pasarela).strip()}"
-    else:
-        prefijo_trx = "TRX-ECOM" if es_digital else "TRX-POS"
-        codigo_trx = f"{prefijo_trx}-{ahora.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    prefijo_trx = "TRX-ECOM" if es_digital else "TRX-POS"
+    codigo_trx = f"{prefijo_trx}-{ahora.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     nueva_venta = Venta(
         fecha=ahora,
         total=total_bruto,
@@ -441,19 +436,15 @@ def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depen
     metodo_id = venta_in.metodo_pago_id or 1
     if venta_in.metodo_pago:
         m_str = venta_in.metodo_pago.lower()
-        if "stripe" in m_str:
-            metodo_st = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%Stripe%")).first()
-            metodo_id = metodo_st.id if metodo_st else 4
-        elif "qr" in m_str:
+        if "qr" in m_str:
             metodo_qr = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%QR%")).first()
             metodo_id = metodo_qr.id if metodo_qr else 3
         elif "efectivo" in m_str:
             metodo_ef = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%Efectivo%")).first()
             metodo_id = metodo_ef.id if metodo_ef else 1
         else:
-            metodo_st = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%Stripe%")).first()
             metodo_tj = db.query(MetodoPago).filter(MetodoPago.nombre.ilike("%Tarjeta%")).first()
-            metodo_id = metodo_st.id if metodo_st else (metodo_tj.id if metodo_tj else 4)
+            metodo_id = metodo_tj.id if metodo_tj else 2
 
     # Resolver sucursal
     suc_id = venta_in.sucursal_id or 1
@@ -515,8 +506,7 @@ def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depen
         razon_social=venta_in.razon_social or f"{cliente.nombre} {cliente.apellido_pat}",
         monto_recibido=None,
         descuento_total=0.0,
-        tipo_venta_id=tipo_venta_id,
-        token_pasarela=venta_in.token_pasarela
+        tipo_venta_id=tipo_venta_id
     )
 
     # Vaciar carrito de base de datos si existía
