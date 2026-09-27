@@ -85,6 +85,10 @@ class Ropa(Base):
     promociones_asociadas = relationship("PromocionRopa", back_populates="ropa", cascade="all, delete-orphan")
     resenas = relationship("Resena", back_populates="ropa", cascade="all, delete-orphan")
 
+    @property
+    def imagen_principal(self) -> Optional[str]:
+        return self.imagen_uri
+
 
 class Talla(Base):
     """

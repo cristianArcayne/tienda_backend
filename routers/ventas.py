@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
@@ -67,7 +68,7 @@ def _formatear_venta(venta: Venta) -> VentaResponse:
             prenda_nombre=d.variante.ropa.nombre if (d.variante and d.variante.ropa) else None,
             talla=d.variante.talla.medida if (d.variante and d.variante.talla) else "Única",
             color=d.variante.color.nombre if (d.variante and d.variante.color) else "Estándar",
-            imagen_url=d.variante.ropa.imagen_principal if (d.variante and d.variante.ropa) else None
+            imagen_url=(d.variante.ropa.imagen_uri or getattr(d.variante.ropa, 'imagen_principal', None)) if (d.variante and d.variante.ropa) else None
         )
         for d in (venta.detalles or [])
     ]
@@ -202,7 +203,8 @@ def _ejecutar_venta_pos_core(
     razon_social: Optional[str] = "Sin Nombre",
     monto_recibido: Optional[float] = None,
     descuento_total: Optional[float] = 0.0,
-    tipo_venta_id: Optional[int] = None
+    tipo_venta_id: Optional[int] = None,
+    token_pasarela: Optional[str] = None
 ) -> Venta:
     # 1. Validar sucursal
     sucursal = db.query(Sucursal).filter(Sucursal.id == sucursal_id).first()
@@ -304,7 +306,7 @@ def _ejecutar_venta_pos_core(
     # 7. Registrar Venta
     ahora = datetime.now()
     prefijo_trx = "TRX-ECOM" if es_digital else "TRX-POS"
-    codigo_trx = f"{prefijo_trx}-{ahora.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    codigo_trx = token_pasarela or f"{prefijo_trx}-{ahora.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     nueva_venta = Venta(
         fecha=ahora,
         total=total_bruto,
@@ -568,11 +570,21 @@ def listar_mis_ventas(
 
     if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
         ci_target = str(cliente_ci).strip()
-        u = db.query(Usuario).filter(Usuario.nombre_usuario == ci_target).first()
-        if not u and ci_target.isdigit():
-            u = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
-        ci_real = u.persona_ci if (u and u.persona_ci) else ci_target
-        query = query.filter(or_(Venta.cliente_id == ci_real, Venta.cliente_id == ci_target))
+        ci_targets = [ci_target]
+        u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_target)).first()
+        if not u and "@" in ci_target:
+            p = db.query(Persona).filter(Persona.correo.ilike(ci_target)).first()
+            if p:
+                ci_targets.append(p.ci)
+                u = db.query(Usuario).filter(Usuario.persona_ci == p.ci).first()
+        if u and u.persona_ci:
+            ci_targets.append(u.persona_ci)
+        if ci_target.isdigit():
+            u_id = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
+            if u_id and u_id.persona_ci:
+                ci_targets.append(u_id.persona_ci)
+
+        query = query.filter(Venta.cliente_id.in_(ci_targets))
 
     ventas = query.order_by(Venta.id.desc()).all()
     return [_formatear_venta(v) for v in ventas]
@@ -605,11 +617,21 @@ def listar_ventas(
 
     if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
         ci_target = str(cliente_ci).strip()
-        u = db.query(Usuario).filter(Usuario.nombre_usuario == ci_target).first()
-        if not u and ci_target.isdigit():
-            u = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
-        ci_real = u.persona_ci if (u and u.persona_ci) else ci_target
-        query = query.filter(or_(Venta.cliente_id == ci_real, Venta.cliente_id == ci_target))
+        ci_targets = [ci_target]
+        u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_target)).first()
+        if not u and "@" in ci_target:
+            p = db.query(Persona).filter(Persona.correo.ilike(ci_target)).first()
+            if p:
+                ci_targets.append(p.ci)
+                u = db.query(Usuario).filter(Usuario.persona_ci == p.ci).first()
+        if u and u.persona_ci:
+            ci_targets.append(u.persona_ci)
+        if ci_target.isdigit():
+            u_id = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
+            if u_id and u_id.persona_ci:
+                ci_targets.append(u_id.persona_ci)
+
+        query = query.filter(Venta.cliente_id.in_(ci_targets))
 
     ventas = query.order_by(Venta.id.desc()).all()
     return [_formatear_venta(v) for v in ventas]
