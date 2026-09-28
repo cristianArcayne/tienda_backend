@@ -75,12 +75,14 @@ class VariantePrendaCreate(BaseModel):
     sku: str = Field(..., max_length=50)
     cod_barra: str = Field(..., max_length=50)
     precio_ajustado: Optional[float] = None
+    imagen_url: Optional[str] = None
 
 class VariantePrendaResponse(BaseModel):
     id: int
     sku: Optional[str] = None
     cod_barra: str
     precio_ajustado: Optional[float] = None
+    imagen_url: Optional[str] = None
     ropa_id: int
     talla_id: int
     color_id: int

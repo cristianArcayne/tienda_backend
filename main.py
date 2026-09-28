@@ -56,8 +56,17 @@ from routers.sugerencias_compra import router as sugerencias_compra_router
 from routers.devoluciones import router as devoluciones_router, router_compat as devoluciones_compat_router, router_api_compat as devoluciones_api_compat_router
 from routers.stripe_pagos import router as stripe_pagos_router, router_compat as stripe_pagos_compat_router
 
+from sqlalchemy import text
+
 # Crear tablas en base de datos si no existen
 Base.metadata.create_all(bind=engine)
+
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE variantes_prenda ADD COLUMN IF NOT EXISTS imagen_url VARCHAR(500);"))
+        conn.commit()
+except Exception:
+    pass
 
 app = FastAPI(
     title="FashionStore API - Backend de Comercio Electrónico Omnicanal",

@@ -74,7 +74,10 @@ def _formatear_ropa(ropa: Ropa) -> RopaResponse:
     variantes_resp = [
         VariantePrendaResponse(
             id=v.id,
+            sku=v.sku,
             cod_barra=v.cod_barra,
+            precio_ajustado=float(v.precio_ajustado) if v.precio_ajustado is not None else None,
+            imagen_url=_normalizar_media_url(v.imagen_url) if getattr(v, 'imagen_url', None) else (_normalizar_media_url(ropa.imagen_uri) if ropa else None),
             ropa_id=v.ropa_id,
             talla_id=v.talla_id,
             color_id=v.color_id,
@@ -194,7 +197,8 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None, sucursal_id: Opt
             "color_nombre": color_nombre,
             "color_hex": color_hex,
             "talla": {"id": v.talla.id, "nombre": v.talla.nombre} if v.talla else None,
-            "color": {"id": v.color.id, "nombre": v.color.nombre, "codigo_hex": color_hex} if v.color else None
+            "color": {"id": v.color.id, "nombre": v.color.nombre, "codigo_hex": color_hex} if v.color else None,
+            "imagen_url": _normalizar_media_url(v.imagen_url) if getattr(v, 'imagen_url', None) else (_normalizar_media_url(ropa.imagen_uri) if ropa else None)
         })
 
     stock_total_producto = sum(v["stock"] for v in variantes_list)
@@ -934,7 +938,7 @@ def listar_variantes_compat(
             "producto_nombre": ropa.nombre if ropa else f"Prenda #{v.ropa_id}",
             "categoria_nombre": ropa.categoria.nombre if (ropa and ropa.categoria) else "General",
             "marca_nombre": ropa.proveedor.razon_social if (ropa and ropa.proveedor) else "FashionStore",
-            "imagen_url": _normalizar_media_url(ropa.imagen_uri) if ropa else None,
+            "imagen_url": _normalizar_media_url(v.imagen_url) if getattr(v, 'imagen_url', None) else (_normalizar_media_url(ropa.imagen_uri) if ropa else None),
             "talla_id": v.talla_id,
             "talla_nombre": talla_nom,
             "color_id": v.color_id,
@@ -962,6 +966,7 @@ def crear_variante_compat(data: dict, db: Session = Depends(get_db)):
     sku = data.get("sku") or f"SKU-{uuid.uuid4().hex[:6].upper()}"
     cod_barra = data.get("cod_barra") or f"BAR-{uuid.uuid4().hex[:8].upper()}"
     precio_ajustado = data.get("precio_ajustado") or data.get("precio")
+    imagen_url = data.get("imagen_url")
     
     nueva = VariantePrenda(
         ropa_id=ropa_id,
@@ -969,7 +974,8 @@ def crear_variante_compat(data: dict, db: Session = Depends(get_db)):
         color_id=color_id,
         sku=sku,
         cod_barra=cod_barra,
-        precio_ajustado=precio_ajustado
+        precio_ajustado=precio_ajustado,
+        imagen_url=imagen_url
     )
     db.add(nueva)
     db.commit()
@@ -978,6 +984,8 @@ def crear_variante_compat(data: dict, db: Session = Depends(get_db)):
 
 @router_variantes_compat.put("/{var_id}")
 @router_variantes_compat.put("/{var_id}/")
+@router_variantes_compat.patch("/{var_id}")
+@router_variantes_compat.patch("/{var_id}/")
 def actualizar_variante_compat(var_id: int, data: dict, db: Session = Depends(get_db)):
     var = db.query(VariantePrenda).filter(VariantePrenda.id == var_id).first()
     if not var:
@@ -992,9 +1000,44 @@ def actualizar_variante_compat(var_id: int, data: dict, db: Session = Depends(ge
         var.cod_barra = data["cod_barra"]
     if "precio_ajustado" in data:
         var.precio_ajustado = data["precio_ajustado"]
+    if "imagen_url" in data:
+        var.imagen_url = data["imagen_url"]
     db.commit()
     db.refresh(var)
-    return {"message": "Variante actualizada exitosamente"}
+    return {
+        "message": "Variante actualizada exitosamente",
+        "id": var.id,
+        "imagen_url": _normalizar_media_url(var.imagen_url) if getattr(var, 'imagen_url', None) else None
+    }
+
+@router_variantes_compat.post("/{var_id}/imagen")
+@router_variantes_compat.post("/{var_id}/imagen/")
+async def subir_imagen_variante_compat(
+    var_id: int,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    var = db.query(VariantePrenda).filter(VariantePrenda.id == var_id).first()
+    if not var:
+        raise HTTPException(status_code=404, detail="Variante no encontrada")
+    
+    os.makedirs(os.path.join("static", "uploads"), exist_ok=True)
+    ext = os.path.splitext(archivo.filename)[1].lower()
+    filename = f"variante_{var_id}_{uuid.uuid4().hex[:8]}{ext}"
+    filepath = os.path.join("static", "uploads", filename)
+    
+    with open(filepath, "wb") as f:
+        f.write(await archivo.read())
+        
+    url_guardada = f"/static/uploads/{filename}"
+    var.imagen_url = url_guardada
+    db.commit()
+    db.refresh(var)
+    
+    return {
+        "message": "Foto de variante subida exitosamente",
+        "imagen_url": _normalizar_media_url(url_guardada)
+    }
 
 @router_variantes_compat.delete("/{var_id}")
 @router_variantes_compat.delete("/{var_id}/")

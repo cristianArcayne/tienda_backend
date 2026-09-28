@@ -137,6 +137,7 @@ class VariantePrenda(Base):
     sku = Column(String(50), nullable=True)
     cod_barra = Column(String(60), nullable=False, unique=True, index=True)
     precio_ajustado = Column(Numeric(10, 2), nullable=True)
+    imagen_url = Column(String(500), nullable=True)
     activo = Column(Boolean, default=True)
 
     ropa_id = Column(Integer, ForeignKey("ropa.id", ondelete="CASCADE"), nullable=False)
