@@ -17,6 +17,7 @@ from schemas.catalogo_disponibilidad import (
     PrendaCatalogoDisponibilidadResponse,
     SucursalStockDetalleResponse,
 )
+from routers.catalogo import _normalizar_media_url
 
 router = APIRouter(
     prefix="/api/v1/catalogo-disponibilidad",
@@ -51,6 +52,7 @@ def consultar_catalogo_con_disponibilidad(
     solo_con_stock: Optional[bool] = Query(False, description="Mostrar solo prendas con existencias disponibles"),
     solo_ar: Optional[bool] = Query(False, description="Filtrar solo prendas con modelo 3D para AR"),
     buscar: Optional[str] = Query(None, description="Búsqueda predictiva por nombre o descripción"),
+    prenda_id: Optional[int] = Query(None, description="Filtrar por ID de prenda específico"),
     db: Session = Depends(get_db)
 ):
     id_categoria = id_categoria if isinstance(id_categoria, int) else None
@@ -60,6 +62,7 @@ def consultar_catalogo_con_disponibilidad(
     solo_con_stock = solo_con_stock if isinstance(solo_con_stock, bool) else False
     solo_ar = solo_ar if isinstance(solo_ar, bool) else False
     buscar = buscar if isinstance(buscar, str) else None
+    prenda_id = prenda_id if isinstance(prenda_id, int) else None
 
     hoy = date.today()
 
@@ -70,6 +73,9 @@ def consultar_catalogo_con_disponibilidad(
         selectinload(Ropa.variantes).selectinload(VariantePrenda.inventarios_sucursal).joinedload(InventarioSucursal.sucursal),
         selectinload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion)
     )
+
+    if prenda_id:
+        query = query.filter(Ropa.id == prenda_id)
 
     if id_categoria:
         query = query.filter(Ropa.categoria_id == id_categoria)
@@ -154,6 +160,8 @@ def consultar_catalogo_con_disponibilidad(
             stock_total_fisico_prod += stock_fisico_var
             stock_total_disponible_prod += stock_disponible_var
 
+            var_img = _normalizar_media_url(v.imagen_url) if getattr(v, 'imagen_url', None) else None
+
             variantes_procesadas.append(
                 VarianteConStockResponse(
                     variante_id=v.id,
@@ -165,12 +173,21 @@ def consultar_catalogo_con_disponibilidad(
                     stock_fisico_total=stock_fisico_var,
                     stock_disponible_total=stock_disponible_var,
                     estado_disponibilidad=_calcular_estado_stock(stock_disponible_var),
-                    disponibilidad_sucursales=stocks_por_sucursal
+                    disponibilidad_sucursales=stocks_por_sucursal,
+                    imagen_url=var_img
                 )
             )
 
         if (talla or color or solo_con_stock) and not variantes_procesadas:
             continue
+
+        media_list = []
+        img_prin = _normalizar_media_url(r.imagen_uri) if r.imagen_uri else None
+        if img_prin:
+            media_list.append(img_prin)
+        for vp in variantes_procesadas:
+            if vp.imagen_url and vp.imagen_url not in media_list:
+                media_list.append(vp.imagen_url)
 
         resultado.append(
             PrendaCatalogoDisponibilidadResponse(
@@ -183,10 +200,10 @@ def consultar_catalogo_con_disponibilidad(
                 descuento_aplicado_pct=mejor_descuento,
                 id_categoria=r.categoria_id or 1,
                 categoria_nombre=r.categoria.nombre if r.categoria else "General",
-                imagen_principal=r.imagen_uri,
-                modelo_3d_uri=r.modelo_3d_uri,
+                imagen_principal=img_prin,
+                modelo_3d_uri=_normalizar_media_url(r.modelo_3d_uri) if r.modelo_3d_uri else None,
                 tiene_modelo_ar=tiene_ar,
-                recursos_multimedia=[r.imagen_uri] if r.imagen_uri else [],
+                recursos_multimedia=media_list,
                 variantes=variantes_procesadas,
                 stock_fisico_cadena=stock_total_fisico_prod,
                 stock_disponible_cadena=stock_total_disponible_prod,
@@ -208,14 +225,9 @@ def consultar_catalogo_con_disponibilidad(
     include_in_schema=False
 )
 def obtener_disponibilidad_por_id(prenda_id: int, db: Session = Depends(get_db)):
-    res = consultar_catalogo_con_disponibilidad(db=db)
-    for p in res:
-        if p.id == prenda_id:
-            return p
-    res_direct = consultar_catalogo_con_disponibilidad(solo_con_stock=False, db=db)
-    for p in res_direct:
-        if p.id == prenda_id:
-            return p
+    res = consultar_catalogo_con_disponibilidad(prenda_id=prenda_id, solo_con_stock=False, db=db)
+    if res:
+        return res[0]
     raise HTTPException(status_code=404, detail=f"Prenda #{prenda_id} no encontrada en catálogo.")
 
 

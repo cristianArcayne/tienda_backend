@@ -29,6 +29,7 @@ class VarianteConStockResponse(BaseModel):
     stock_disponible_total: int
     estado_disponibilidad: str
     disponibilidad_sucursales: List[StockSucursalResponse] = []
+    imagen_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
