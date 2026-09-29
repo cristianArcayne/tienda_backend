@@ -7,7 +7,7 @@ import os
 import uuid
 from datetime import date
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import exists, or_
 
@@ -694,13 +694,45 @@ def eliminar_producto_compat(ropa_id: int, db: Session = Depends(get_db)):
 
 @router_productos_compat.get("/{ropa_id}/recomendados")
 @router_productos_compat.get("/{ropa_id}/recomendados/")
-def recomendados_compat(ropa_id: int, db: Session = Depends(get_db)):
-    ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
-    query = db.query(Ropa).filter(Ropa.id != ropa_id)
-    if ropa and ropa.categoria_id:
-        query = query.filter(Ropa.categoria_id == ropa.categoria_id)
-    recomendados = query.limit(4).all()
-    return [_formatear_producto_angular(r, db=db) for r in recomendados]
+def recomendados_compat(ropa_id: int, request: Request, db: Session = Depends(get_db)):
+    from models.seguridad_persona import Usuario, Favorito
+    from models.ventas_envios import Venta, DetalleVenta
+    
+    recomendados_set = set()
+    
+    user_id = request.headers.get("x-user-id")
+    usuario_id_bd = None
+    
+    if user_id and user_id.isdigit():
+        usuario_id_bd = int(user_id)
+        
+    if usuario_id_bd:
+        favs = db.query(Favorito.ropa_id).filter(Favorito.usuario_id == usuario_id_bd).all()
+        for f in favs:
+            if f[0] != ropa_id:
+                recomendados_set.add(f[0])
+                
+        compras = db.query(DetalleVenta.ropa_id).join(Venta).filter(Venta.cliente_id == usuario_id_bd).all()
+        for c in compras:
+            if c[0] != ropa_id:
+                recomendados_set.add(c[0])
+                
+    ropa_rec = []
+    if recomendados_set:
+        ropa_rec = db.query(Ropa).filter(Ropa.id.in_(recomendados_set)).limit(4).all()
+        
+    faltantes = 4 - len(ropa_rec)
+    if faltantes > 0:
+        ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
+        if ropa:
+            excluir_ids = [r.id for r in ropa_rec] + [ropa_id]
+            q = db.query(Ropa).filter(Ropa.id.notin_(excluir_ids))
+            if ropa.categoria_id:
+                q = q.filter(Ropa.categoria_id == ropa.categoria_id)
+            comp = q.limit(faltantes).all()
+            ropa_rec.extend(comp)
+            
+    return [_formatear_producto_angular(r, db=db) for r in ropa_rec]
 
 
 # ─── Endpoint para Detalle de Producto (/api/productos-detalle) ─────────────
@@ -1048,3 +1080,5 @@ def eliminar_variante_compat(var_id: int, db: Session = Depends(get_db)):
     db.delete(var)
     db.commit()
     return {"message": "Variante eliminada exitosamente"}
+
+
