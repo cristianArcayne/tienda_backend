@@ -177,7 +177,7 @@ class ResenaItemResponse(BaseModel):
     puntuacion_estrellas: int
     calificacion: Optional[int] = None
     comentario: Optional[str] = None
-    fecha: date
+    fecha: Union[date, datetime, str]
     fecha_creacion: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)

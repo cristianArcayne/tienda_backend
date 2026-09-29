@@ -3,8 +3,8 @@ Router para CU19: Gestionar Reseñas y Calificaciones.
 Registro de feedback del cliente, cálculo de satisfacción y promedios de calificación en el catálogo.
 """
 from typing import List, Optional, Dict, Any, Union
-from datetime import date
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from datetime import date, datetime
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
@@ -86,11 +86,36 @@ def resolver_o_crear_cliente(db: Session, cliente_ci_raw: str, cliente_nombre_ra
     return nuevo_cliente
 
 
+def _formatear_resena_response(r: Resena, cli_nom: Optional[str] = None) -> ResenaItemResponse:
+    if not cli_nom:
+        cli_nom = obtener_nombre_cliente(getattr(r, 'cliente', None), r.cliente_id)
+    fecha_raw = r.fecha
+    if hasattr(fecha_raw, 'strftime'):
+        fecha_str = fecha_raw.strftime("%Y-%m-%d")
+    else:
+        fecha_str = str(fecha_raw).split("T")[0].split(" ")[0]
+    
+    return ResenaItemResponse(
+        id=r.id,
+        ropa_id=r.ropa_id,
+        producto=r.ropa_id,
+        cliente_ci=r.cliente_id,
+        cliente_nombre=cli_nom,
+        usuario_username=cli_nom,
+        usuario=1,
+        puntuacion_estrellas=r.puntuacion_estrellas,
+        calificacion=r.puntuacion_estrellas,
+        comentario=r.comentario,
+        fecha=fecha_str,
+        fecha_creacion=fecha_str
+    )
+
+
 @router.post("", response_model=ResenaItemResponse, status_code=status.HTTP_201_CREATED)
 @router.post("/", response_model=ResenaItemResponse, status_code=status.HTTP_201_CREATED)
 @compat_router.post("", response_model=ResenaItemResponse, status_code=status.HTTP_201_CREATED)
 @compat_router.post("/", response_model=ResenaItemResponse, status_code=status.HTTP_201_CREATED)
-def crear_resena(resena_in: ResenaCreateRequest, db: Session = Depends(get_db)):
+def crear_resena(resena_in: ResenaCreateRequest, request: Request = None, db: Session = Depends(get_db)):
     rid = resena_in.ropa_id or resena_in.producto_id or 1
     estrellas = resena_in.puntuacion_estrellas or resena_in.calificacion or 5
 
@@ -100,7 +125,14 @@ def crear_resena(resena_in: ResenaCreateRequest, db: Session = Depends(get_db)):
         prenda = db.query(Ropa).first()
         rid = prenda.id if prenda else 1
 
-    cliente = resolver_o_crear_cliente(db, str(resena_in.cliente_ci or "admin"), resena_in.cliente_nombre)
+    ci_origen = resena_in.cliente_ci
+    nombre_origen = resena_in.cliente_nombre
+    if request:
+        user_header = request.headers.get("x-user-id")
+        if user_header and (not ci_origen or ci_origen == "admin"):
+            ci_origen = user_header
+
+    cliente = resolver_o_crear_cliente(db, str(ci_origen or "admin"), nombre_origen)
 
     # 2. Crear y persistir reseña en PostgreSQL
     nueva_resena = Resena(
@@ -115,16 +147,7 @@ def crear_resena(resena_in: ResenaCreateRequest, db: Session = Depends(get_db)):
     db.refresh(nueva_resena)
 
     cli_nom = obtener_nombre_cliente(cliente, cliente.ci)
-
-    return ResenaItemResponse(
-        id=nueva_resena.id,
-        ropa_id=nueva_resena.ropa_id,
-        cliente_ci=nueva_resena.cliente_id,
-        cliente_nombre=cli_nom,
-        puntuacion_estrellas=nueva_resena.puntuacion_estrellas,
-        comentario=nueva_resena.comentario,
-        fecha=nueva_resena.fecha
-    )
+    return _formatear_resena_response(nueva_resena, cli_nom)
 
 
 @router.get("", response_model=Union[List[ResenaItemResponse], Dict[str, Any]])
@@ -147,25 +170,7 @@ def listar_todas_las_resenas(
     eff_limit = page_size or limit
     resenas = query.order_by(Resena.id.desc()).limit(eff_limit).all()
 
-    resultado = []
-    for r in resenas:
-        cli_nom = obtener_nombre_cliente(r.cliente, r.cliente_id)
-        resultado.append(
-            ResenaItemResponse(
-                id=r.id,
-                ropa_id=r.ropa_id,
-                producto=r.ropa_id,
-                cliente_ci=r.cliente_id,
-                cliente_nombre=cli_nom,
-                usuario_username=cli_nom,
-                usuario=1,
-                puntuacion_estrellas=r.puntuacion_estrellas,
-                calificacion=r.puntuacion_estrellas,
-                comentario=r.comentario,
-                fecha=r.fecha,
-                fecha_creacion=r.fecha.isoformat() if hasattr(r.fecha, 'isoformat') else str(r.fecha)
-            )
-        )
+    resultado = [_formatear_resena_response(r) for r in resenas]
     
     if page_size is not None or page is not None:
         return {
@@ -193,21 +198,7 @@ def listar_resenas_prenda(
         .order_by(Resena.id.desc())\
         .limit(limit).all()
 
-    resultado = []
-    for r in resenas:
-        cli_nom = obtener_nombre_cliente(r.cliente, r.cliente_id)
-        resultado.append(
-            ResenaItemResponse(
-                id=r.id,
-                ropa_id=r.ropa_id,
-                cliente_ci=r.cliente_id,
-                cliente_nombre=cli_nom,
-                puntuacion_estrellas=r.puntuacion_estrellas,
-                comentario=r.comentario,
-                fecha=r.fecha
-            )
-        )
-
+    resultado = [_formatear_resena_response(r) for r in resenas]
     return resultado
 
 
@@ -250,19 +241,7 @@ def obtener_resumen_calificaciones(ropa_id: int, db: Session = Depends(get_db)):
 
     # Ordenar las reseñas de la más reciente a la más antigua
     resenas_ordenadas = sorted(resenas, key=lambda x: x.id, reverse=True)
-
-    ultimas = [
-        ResenaItemResponse(
-            id=r.id,
-            ropa_id=r.ropa_id,
-            cliente_ci=r.cliente_id,
-            cliente_nombre=obtener_nombre_cliente(r.cliente, r.cliente_id),
-            puntuacion_estrellas=r.puntuacion_estrellas,
-            comentario=r.comentario,
-            fecha=r.fecha
-        )
-        for r in resenas_ordenadas[:20]
-    ]
+    ultimas = [_formatear_resena_response(r) for r in resenas_ordenadas[:20]]
 
     return ResumenCalificacionesRopaResponse(
         ropa_id=prenda.id,
@@ -310,20 +289,7 @@ def actualizar_resena(
     db.refresh(resena)
 
     cli_nom = obtener_nombre_cliente(resena.cliente, resena.cliente_id)
-    return ResenaItemResponse(
-        id=resena.id,
-        ropa_id=resena.ropa_id,
-        producto=resena.ropa_id,
-        cliente_ci=resena.cliente_id,
-        cliente_nombre=cli_nom,
-        usuario_username=cli_nom,
-        usuario=1,
-        puntuacion_estrellas=resena.puntuacion_estrellas,
-        calificacion=resena.puntuacion_estrellas,
-        comentario=resena.comentario,
-        fecha=resena.fecha,
-        fecha_creacion=resena.fecha.isoformat() if hasattr(resena.fecha, 'isoformat') else str(resena.fecha)
-    )
+    return _formatear_resena_response(resena, cli_nom)
 
 
 @router.delete("/{resena_id}", status_code=status.HTTP_200_OK)

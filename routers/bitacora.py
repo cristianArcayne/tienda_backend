@@ -67,6 +67,10 @@ def registrar_bitacora(
     Normaliza acciones a: INSERT, UPDATE, DELETE, LOGIN, LOGOUT
     """
     if request:
+        try:
+            request.state.bitacora_registrada = True
+        except Exception:
+            pass
         req_user_id, req_ip = obtener_usuario_e_ip(request)
         if usuario_id is None:
             usuario_id = req_user_id

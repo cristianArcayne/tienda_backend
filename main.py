@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
@@ -101,6 +101,66 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Middleware Global de Bitácora de Auditoría ──────────────────────────────
+@app.middleware("http")
+async def bitacora_auditoria_middleware(request: Request, call_next):
+    """
+    Captura automáticamente toda acción mutante (INSERT/Añadir, UPDATE/Modificar, DELETE/Eliminar)
+    para garantizar trazabilidad completa en la base de datos de FashionStore.
+    """
+    response = await call_next(request)
+
+    if request.method in ["POST", "PUT", "PATCH", "DELETE"] and 200 <= response.status_code < 400:
+        path = request.url.path
+        if (
+            not path.startswith("/static")
+            and not path.startswith("/api/v1/bitacora")
+            and not path.startswith("/api/bitacora")
+            and not path.startswith("/docs")
+            and not path.startswith("/openapi")
+            and not getattr(request.state, "bitacora_registrada", False)
+        ):
+            try:
+                partes = [p for p in path.strip("/").split("/") if p not in ["api", "v1"]]
+                tabla = partes[0] if partes else "sistema"
+                registro_id = partes[1] if len(partes) > 1 and partes[1].isdigit() else "-"
+
+                if request.method == "POST":
+                    accion = "INSERT"
+                    accion_desc = "Añadir / Crear"
+                elif request.method in ["PUT", "PATCH"]:
+                    accion = "UPDATE"
+                    accion_desc = "Modificar"
+                elif request.method == "DELETE":
+                    accion = "DELETE"
+                    accion_desc = "Eliminar"
+                else:
+                    accion = request.method
+                    accion_desc = request.method
+
+                detalles = f"Operación {accion_desc} en {tabla} mediante {request.method} {path}"
+                if registro_id != "-":
+                    detalles += f" (ID: {registro_id})"
+
+                from database import SessionLocal
+                from routers.bitacora import registrar_bitacora
+                db_audit = SessionLocal()
+                try:
+                    registrar_bitacora(
+                        db=db_audit,
+                        accion=accion,
+                        tabla=tabla,
+                        registro_id=registro_id,
+                        detalles=detalles,
+                        request=request
+                    )
+                finally:
+                    db_audit.close()
+            except Exception as e:
+                pass
+
+    return response
 
 # Montar carpeta de archivos estáticos (fotografías y modelos 3D .glb)
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
