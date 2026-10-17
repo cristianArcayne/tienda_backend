@@ -76,8 +76,10 @@ class Ropa(Base):
     categoria_id = Column(Integer, ForeignKey("categorias.id", ondelete="RESTRICT"), nullable=True)
     temporada_id = Column(Integer, ForeignKey("temporadas.id", ondelete="SET NULL"), nullable=True)
     proveedor_id = Column(Integer, ForeignKey("proveedores.id", ondelete="SET NULL"), nullable=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id", ondelete="CASCADE"), nullable=True, default=1, index=True)
 
     # Relaciones
+    empresa = relationship("Empresa", back_populates="prendas")
     categoria = relationship("Categoria", back_populates="ropas")
     temporada = relationship("Temporada", back_populates="ropas")
     proveedor = relationship("Proveedor", back_populates="ropas")

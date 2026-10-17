@@ -22,8 +22,10 @@ class Sucursal(Base):
     ciudad = Column(String(50), nullable=False, default="Santa Cruz")
     telefono = Column(String(30), nullable=True)
     activo = Column(Boolean, default=True, nullable=False)
+    empresa_id = Column(Integer, ForeignKey("empresas.id", ondelete="CASCADE"), nullable=True, default=1, index=True)
 
     # Relaciones
+    empresa = relationship("Empresa", back_populates="sucursales")
     inventarios = relationship("InventarioSucursal", back_populates="sucursal", cascade="all, delete-orphan")
     reservas = relationship("Reserva", back_populates="sucursal")
     ventas = relationship("Venta", back_populates="sucursal")

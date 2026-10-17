@@ -64,6 +64,7 @@ class Venta(Base):
     sucursal_id = Column(Integer, ForeignKey("sucursales.id", ondelete="RESTRICT"), nullable=False)
     metodo_pago_id = Column(Integer, ForeignKey("metodos_pago.id", ondelete="RESTRICT"), nullable=False)
     tipo_venta_id = Column(Integer, ForeignKey("tipos_venta.id", ondelete="RESTRICT"), nullable=False)
+    empresa_id = Column(Integer, ForeignKey("empresas.id", ondelete="SET NULL"), nullable=True, default=1, index=True)
 
     # Relaciones
     empleado = relationship("Empleado", back_populates="ventas_atendidas")

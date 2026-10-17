@@ -110,10 +110,12 @@ class Usuario(Base):
 
     persona_ci = Column(String(20), ForeignKey("personas.ci", ondelete="CASCADE"), unique=True, nullable=False)
     rol_id = Column(Integer, ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False)
+    empresa_id = Column(Integer, ForeignKey("empresas.id", ondelete="SET NULL"), nullable=True, default=1, index=True)
 
     # Relaciones
     persona = relationship("Persona", back_populates="usuario")
     rol = relationship("Rol", back_populates="usuarios")
+    empresa = relationship("Empresa", back_populates="usuarios")
     bitacoras = relationship("Bitacora", back_populates="usuario", cascade="all, delete-orphan")
 
 

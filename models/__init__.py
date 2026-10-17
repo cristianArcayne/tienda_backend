@@ -64,6 +64,14 @@ from models.ia_alerta import AlertaIAModel
 from models.fidelizacion import ConfiguracionFidelizacionModel
 from models.notificacion import SuscripcionPushModel
 
+# 8. SaaS Multitenant y Suscripciones
+from models.empresa_suscripcion import (
+    Empresa,
+    PlanSuscripcion,
+    SuscripcionEmpresa,
+    HistorialCambioPlan
+)
+
 __all__ = [
     "Base",
     "Persona", "Empleado", "Cliente", "Usuario", "Rol", "Permiso", "Bitacora",
@@ -73,5 +81,6 @@ __all__ = [
     "CarritoCompra", "DetalleCarritoCompra",
     "Reserva", "DetalleReserva",
     "MetodoPago", "TipoVenta", "Venta", "DetalleVenta", "Factura",
-    "RecomendacionIA", "AlertaIAModel", "ConfiguracionFidelizacionModel", "SuscripcionPushModel"
+    "RecomendacionIA", "AlertaIAModel", "ConfiguracionFidelizacionModel", "SuscripcionPushModel",
+    "Empresa", "PlanSuscripcion", "SuscripcionEmpresa", "HistorialCambioPlan"
 ]

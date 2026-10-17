@@ -25,6 +25,7 @@ class Reserva(Base):
 
     cliente_id = Column("cliente_ci", String(20), ForeignKey("clientes.ci", ondelete="CASCADE"), nullable=False)
     sucursal_id = Column(Integer, ForeignKey("sucursales.id", ondelete="RESTRICT"), nullable=False)
+    empresa_id = Column(Integer, ForeignKey("empresas.id", ondelete="SET NULL"), nullable=True, default=1, index=True)
 
     # Relaciones
     cliente = relationship("Cliente", back_populates="reservas")
