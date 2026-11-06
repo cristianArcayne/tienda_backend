@@ -28,7 +28,7 @@ from routers.reservas import router as reservas_router, router_compat as reserva
 from routers.carrito_persistente import router as carrito_persistente_router
 from routers.ar_vestidor import router as ar_vestidor_router
 from routers.recomendador_ia import router as recomendador_ia_router, compat_router as recomendador_ia_compat_router
-from routers.reportes_voz import router as reportes_voz_router
+from routers.reportes_voz import router as reportes_voz_router, compat_router as reportes_voz_compat_router
 from routers.reportes_tabulares import router as reportes_tabulares_router, compat_router as reportes_tabulares_compat_router
 from routers.resenas_calificaciones import router as resenas_calificaciones_router, compat_router as resenas_compat_router
 from routers.parametros_catalogo import (
@@ -164,10 +164,20 @@ async def bitacora_auditoria_middleware(request: Request, call_next):
 
     return response
 
-# Montar carpeta de archivos estáticos (fotografías y modelos 3D .glb)
+# Montar carpeta de archivos estáticos (fotografías y modelos 3D .glb) con CORS y Private Network Access habilitados
+class CORSStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
+
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 os.makedirs(os.path.join(_static_dir, "uploads"), exist_ok=True)
-app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+app.mount("/static", CORSStaticFiles(directory=_static_dir), name="static")
 
 # Inclusión de Routers modulares por Caso de Uso
 app.include_router(tallas_router)
@@ -210,6 +220,7 @@ app.include_router(ar_vestidor_router)
 app.include_router(recomendador_ia_router)
 app.include_router(recomendador_ia_compat_router)
 app.include_router(reportes_voz_router)
+app.include_router(reportes_voz_compat_router)
 app.include_router(reportes_tabulares_router)
 app.include_router(reportes_tabulares_compat_router)
 app.include_router(resenas_calificaciones_router)

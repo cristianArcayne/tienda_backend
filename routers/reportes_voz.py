@@ -29,6 +29,13 @@ router = APIRouter(
     dependencies=[Depends(verificar_acceso_ia)]
 )
 
+compat_router = APIRouter(
+    prefix="/api/reportes-voz",
+    tags=["CU18. Generar reportes mediante comandos de voz (Compat)"],
+    dependencies=[Depends(verificar_acceso_ia)],
+    include_in_schema=False
+)
+
 
 import os
 import json
@@ -573,6 +580,26 @@ def _interpretar_y_generar_reporte(comando: str, db: Session) -> ReporteVozRespo
     response_model=ReporteVozResponse,
     include_in_schema=False
 )
+@compat_router.post(
+    "/comando-texto",
+    response_model=ReporteVozResponse,
+    include_in_schema=False
+)
+@compat_router.post(
+    "/comando-texto/",
+    response_model=ReporteVozResponse,
+    include_in_schema=False
+)
+@compat_router.post(
+    "/procesar-comando",
+    response_model=ReporteVozResponse,
+    include_in_schema=False
+)
+@compat_router.post(
+    "/procesar-comando/",
+    response_model=ReporteVozResponse,
+    include_in_schema=False
+)
 def procesar_comando_voz_texto(request: ComandoVozTextoRequest, db: Session = Depends(get_db)):
     cmd = request.comando_voz or request.comando_texto or request.comando or "Ventas por sucursal"
     return _interpretar_y_generar_reporte(cmd, db)
@@ -585,6 +612,16 @@ def procesar_comando_voz_texto(request: ComandoVozTextoRequest, db: Session = De
     description="Recibe el blob de audio codificado en Base64 desde el navegador o app móvil, simula la integración con API Speech-to-Text y genera el reporte analítico."
 )
 @router.post(
+    "/procesar-audio/",
+    response_model=ReporteVozResponse,
+    include_in_schema=False
+)
+@compat_router.post(
+    "/procesar-audio",
+    response_model=ReporteVozResponse,
+    include_in_schema=False
+)
+@compat_router.post(
     "/procesar-audio/",
     response_model=ReporteVozResponse,
     include_in_schema=False

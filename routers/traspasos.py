@@ -1,13 +1,19 @@
 """
-Router para CU10: Gestión de Traspasos entre Sucursales.
-Alineado con TRASPASO, DETALLE_TRASPASO, SUCURSAL e INVENTARIO_SUCURSAL del Diagrama UML.
-Permite registrar el envío de mercadería desde una tienda de origen y confirmar su recepción en una tienda de destino para equilibrar el stock.
+Router para CU-13: Gestión Logística de Traspasos entre Sucursales.
+Alineado con TRASPASO, DETALLE_TRASPASO, SUCURSAL, INVENTARIO_SUCURSAL y MOVIMIENTO_INVENTARIO del Diagrama UML.
+Implementa el ciclo de vida en 3 estados formales:
+  1. SOLICITADO: Requerimiento inter-tiendas sin descuento físico inmediato.
+  2. EN_TRANSITO: Despacho oficial con descuento en origen, emisión de Guía de Remisión y QR de transporte.
+  3. RECIBIDO: Confirmación física en destino con reingreso al inventario y liquidación de tránsito (soporta discrepancias/mermas).
 """
+import io
+import json
+import base64
 from datetime import datetime, timezone
 from typing import List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func
 
 from database import get_db
 from models.catalogo import Ropa, VariantePrenda, Talla, Color
@@ -22,6 +28,7 @@ class DetalleTraspasoItemResponse(BaseModel):
     sku: str
     talla: str
     color: str
+    color_hex: Optional[str] = "#4f46e5"
     imagen_uri: Optional[str] = None
     cantidad: int
 
@@ -42,7 +49,21 @@ class TraspasoResponse(BaseModel):
     fecha_recepcion: Optional[datetime] = None
     solicitado_por_ci: Optional[str] = None
     total_unidades: int = 0
+    guia_remision_codigo: Optional[str] = None
+    guia_remision_qr: Optional[str] = None
     detalles: List[DetalleTraspasoItemResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TraspasoMetricasResponse(BaseModel):
+    total_traspasos: int
+    solicitados_count: int
+    en_transito_count: int
+    recibidos_count: int
+    cancelados_count: int
+    total_prendas_trasladadas: int
+    sucursal_mas_activa: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,19 +78,61 @@ class TraspasoCreate(BaseModel):
     sucursal_destino_id: int = Field(..., gt=0)
     observacion: Optional[str] = Field(None, max_length=500)
     solicitado_por_ci: Optional[str] = None
-    despachar_inmediato: Optional[bool] = True
+    despachar_inmediato: Optional[bool] = False
     detalles: List[DetalleTraspasoCreate] = Field(..., min_length=1)
+
+
+class DetalleDiscrepanciaItem(BaseModel):
+    variante_id: int
+    cantidad_recibida_conforme: int
+    cantidad_danada_o_merma: int = 0
+    motivo_merma: Optional[str] = None
+
+
+class ConfirmarRecepcionDiscrepanciaRequest(BaseModel):
+    detalles: List[DetalleDiscrepanciaItem]
+    observacion: Optional[str] = None
+    recibido_por_ci: Optional[str] = None
 
 
 router = APIRouter(
     prefix="/api/v1/traspasos",
-    tags=["CU10. Gestionar traspasos entre sucursales"]
+    tags=["CU13. Gestionar traspasos de mercadería entre sucursales"]
 )
 
 router_compat = APIRouter(
     prefix="/api/traspasos",
-    tags=["CU10. Gestionar traspasos entre sucursales (Compat)"]
+    tags=["CU13. Gestionar traspasos de mercadería entre sucursales (Compat)"]
 )
+
+
+def _generar_qr_remision_base64(codigo_guia: str, traspaso_id: int, origen: str, destino: str, unidades: int) -> str:
+    """Genera código QR oficial para el chofer y la Guía de Remisión."""
+    try:
+        import qrcode
+        payload = {
+            "guia": codigo_guia,
+            "traspaso_id": traspaso_id,
+            "origen": origen,
+            "destino": destino,
+            "unidades": unidades,
+            "tipo": "GUIA_REMISION_INTERSUCURSAL",
+            "validador": "SI2_LOGISTICA_FASHIONSTORE"
+        }
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6,
+            border=2,
+        )
+        qr.add_data(json.dumps(payload))
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="#1e1b4b", back_color="white")
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        return f"data:image/png;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
+    except Exception:
+        return ""
 
 
 def _map_traspaso_to_response(t: Traspaso) -> TraspasoResponse:
@@ -87,18 +150,28 @@ def _map_traspaso_to_response(t: Traspaso) -> TraspasoResponse:
                 sku=v.sku if v else f"SKU-{d.variante_id}",
                 talla=v.talla.nombre if v and v.talla else "M",
                 color=v.color.nombre if v and v.color else "Normal",
+                color_hex=v.color.codigo_hex if v and v.color and v.color.codigo_hex else "#4f46e5",
                 imagen_uri=r.imagen_uri if r else None,
                 cantidad=d.cantidad
             )
         )
 
+    fec_str = t.fecha.strftime("%Y%m%d") if t.fecha else "20261106"
+    codigo_guia = f"REM-{fec_str}-{t.id:05d}"
+    orig_nom = t.sucursal_origen.nombre if t.sucursal_origen else "Origen"
+    dest_nom = t.sucursal_destino.nombre if t.sucursal_destino else "Destino"
+
+    qr_b64 = None
+    if t.estado in ["EN_TRANSITO", "RECIBIDO"]:
+        qr_b64 = _generar_qr_remision_base64(codigo_guia, t.id, orig_nom, dest_nom, total_cant)
+
     return TraspasoResponse(
         id=t.id,
         sucursal_origen_id=t.sucursal_origen_id,
-        sucursal_origen_nombre=t.sucursal_origen.nombre if t.sucursal_origen else "Origen",
+        sucursal_origen_nombre=orig_nom,
         sucursal_origen_ciudad=t.sucursal_origen.ciudad if t.sucursal_origen else "",
         sucursal_destino_id=t.sucursal_destino_id,
-        sucursal_destino_nombre=t.sucursal_destino.nombre if t.sucursal_destino else "Destino",
+        sucursal_destino_nombre=dest_nom,
         sucursal_destino_ciudad=t.sucursal_destino.ciudad if t.sucursal_destino else "",
         estado=t.estado,
         observacion=t.observacion,
@@ -106,6 +179,8 @@ def _map_traspaso_to_response(t: Traspaso) -> TraspasoResponse:
         fecha_recepcion=t.fecha_recepcion,
         solicitado_por_ci=t.empleado_id,
         total_unidades=total_cant,
+        guia_remision_codigo=codigo_guia,
+        guia_remision_qr=qr_b64,
         detalles=detalles_resp
     )
 
@@ -113,6 +188,7 @@ def _map_traspaso_to_response(t: Traspaso) -> TraspasoResponse:
 def _listar_traspasos_impl(
     estado: Optional[str] = None,
     sucursal_id: Optional[int] = None,
+    empresa_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ) -> List[TraspasoResponse]:
     query = (
@@ -127,6 +203,9 @@ def _listar_traspasos_impl(
         .order_by(Traspaso.id.desc())
     )
 
+    if empresa_id:
+        query = query.join(Sucursal, Traspaso.sucursal_origen_id == Sucursal.id).filter(Sucursal.empresa_id == empresa_id)
+
     if estado and estado != "TODOS":
         query = query.filter(Traspaso.estado == estado.upper())
 
@@ -140,6 +219,90 @@ def _listar_traspasos_impl(
 
     traspasos = query.all()
     return [_map_traspaso_to_response(t) for t in traspasos]
+
+
+def _metricas_traspasos_impl(
+    empresa_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+) -> TraspasoMetricasResponse:
+    query = (
+        db.query(Traspaso)
+        .options(
+            joinedload(Traspaso.sucursal_origen),
+            joinedload(Traspaso.detalles)
+        )
+    )
+    if empresa_id:
+        query = query.join(Sucursal, Traspaso.sucursal_origen_id == Sucursal.id).filter(Sucursal.empresa_id == empresa_id)
+
+    traspasos = query.all()
+    total = len(traspasos)
+    solicitados = sum(1 for t in traspasos if t.estado == "SOLICITADO")
+    en_transito = sum(1 for t in traspasos if t.estado == "EN_TRANSITO")
+    recibidos = sum(1 for t in traspasos if t.estado == "RECIBIDO")
+    cancelados = sum(1 for t in traspasos if t.estado == "CANCELADO")
+
+    total_prendas = 0
+    conteo_sucursales = {}
+    for t in traspasos:
+        for d in (t.detalles or []):
+            total_prendas += d.cantidad
+        orig = t.sucursal_origen.nombre if t.sucursal_origen else f"Sucursal #{t.sucursal_origen_id}"
+        conteo_sucursales[orig] = conteo_sucursales.get(orig, 0) + 1
+
+    suc_mas_activa = max(conteo_sucursales, key=conteo_sucursales.get) if conteo_sucursales else "Ninguna"
+
+    return TraspasoMetricasResponse(
+        total_traspasos=total,
+        solicitados_count=solicitados,
+        en_transito_count=en_transito,
+        recibidos_count=recibidos,
+        cancelados_count=cancelados,
+        total_prendas_trasladadas=total_prendas,
+        sucursal_mas_activa=suc_mas_activa
+    )
+
+
+def _variantes_disponibles_sucursal_impl(
+    sucursal_id: int,
+    db: Session = Depends(get_db)
+) -> List[dict]:
+    invs = (
+        db.query(InventarioSucursal)
+        .options(
+            joinedload(InventarioSucursal.variante).joinedload(VariantePrenda.ropa),
+            joinedload(InventarioSucursal.variante).joinedload(VariantePrenda.talla),
+            joinedload(InventarioSucursal.variante).joinedload(VariantePrenda.color)
+        )
+        .filter(
+            InventarioSucursal.sucursal_id == sucursal_id,
+            InventarioSucursal.stock_fisico > 0
+        )
+        .all()
+    )
+    result = []
+    for inv in invs:
+        v = inv.variante
+        if not v:
+            continue
+        r = v.ropa
+        disponible = (inv.stock_fisico or 0) - (inv.stock_reservado or 0)
+        if disponible <= 0:
+            continue
+        result.append({
+            "variante_id": v.id,
+            "ropa_id": r.id if r else 0,
+            "ropa_nombre": r.nombre if r else "Prenda",
+            "sku": v.sku,
+            "talla": v.talla.nombre if v.talla else "M",
+            "color": v.color.nombre if v.color else "Color",
+            "color_hex": v.color.codigo_hex if v.color and v.color.codigo_hex else "#4f46e5",
+            "precio": float(r.precio) if r and r.precio else 0.0,
+            "imagen_uri": r.imagen_uri if r else None,
+            "stock_fisico": inv.stock_fisico,
+            "stock_disponible": disponible
+        })
+    return result
 
 
 def _obtener_traspaso_impl(traspaso_id: int, db: Session = Depends(get_db)) -> TraspasoResponse:
@@ -333,6 +496,96 @@ def _confirmar_recepcion_impl(traspaso_id: int, db: Session = Depends(get_db)) -
     return _obtener_traspaso_impl(t.id, db)
 
 
+def _confirmar_recepcion_discrepancia_impl(
+    traspaso_id: int,
+    req: ConfirmarRecepcionDiscrepanciaRequest,
+    db: Session = Depends(get_db)
+) -> TraspasoResponse:
+    t = db.query(Traspaso).filter(Traspaso.id == traspaso_id).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Traspaso no encontrado.")
+
+    if t.estado != "EN_TRANSITO":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se puede confirmar la recepción de traspasos en estado 'EN_TRANSITO' (estado actual: '{t.estado}')."
+        )
+
+    orig = db.query(Sucursal).filter(Sucursal.id == t.sucursal_origen_id).first()
+    orig_nombre = orig.nombre if orig else "Origen"
+
+    detalles_map = {item.variante_id: item for item in req.detalles}
+    total_mermas = 0
+
+    for d in t.detalles:
+        disc = detalles_map.get(d.variante_id)
+        cant_recibida = disc.cantidad_recibida_conforme if disc else d.cantidad
+        cant_merma = disc.cantidad_danada_o_merma if disc else 0
+
+        if cant_recibida < 0 or cant_merma < 0:
+            raise HTTPException(status_code=400, detail="Cantidades no pueden ser negativas.")
+
+        inv_dest = db.query(InventarioSucursal).filter(
+            InventarioSucursal.sucursal_id == t.sucursal_destino_id,
+            InventarioSucursal.variante_id == d.variante_id
+        ).first()
+
+        if not inv_dest:
+            inv_dest = InventarioSucursal(
+                sucursal_id=t.sucursal_destino_id,
+                variante_id=d.variante_id,
+                stock_fisico=0,
+                stock_reservado=0,
+                stock_minimo=5
+            )
+            db.add(inv_dest)
+            db.flush()
+
+        stock_ant = inv_dest.stock_fisico
+
+        # Ingresar mercadería íntegra
+        if cant_recibida > 0:
+            inv_dest.stock_fisico += cant_recibida
+            inv_dest.fec_actualizacion = datetime.now(timezone.utc)
+            db.add(MovimientoInventario(
+                sucursal_id=t.sucursal_destino_id,
+                variante_id=d.variante_id,
+                tipo_movimiento="TRASPASO_ENTRADA",
+                cantidad=cant_recibida,
+                stock_anterior=stock_ant,
+                stock_nuevo=inv_dest.stock_fisico,
+                motivo=f"Recepción conforme por Traspaso #{t.id} desde {orig_nombre}",
+                usuario_ci=req.recibido_por_ci or t.empleado_id
+            ))
+
+        # Registrar merma o daño en tránsito
+        if cant_merma > 0:
+            total_mermas += cant_merma
+            motivo_m = disc.motivo_merma if disc and disc.motivo_merma else "Prenda dañada durante el transporte"
+            db.add(MovimientoInventario(
+                sucursal_id=t.sucursal_destino_id,
+                variante_id=d.variante_id,
+                tipo_movimiento="MERMA",
+                cantidad=-cant_merma,
+                stock_anterior=inv_dest.stock_fisico,
+                stock_nuevo=inv_dest.stock_fisico,
+                motivo=f"Discrepancia/Merma en Traspaso #{t.id}: {motivo_m}",
+                usuario_ci=req.recibido_por_ci or t.empleado_id
+            ))
+
+    t.estado = "RECIBIDO"
+    t.fecha_recepcion = datetime.now(timezone.utc)
+    if total_mermas > 0:
+        obs_extra = f" | [DISCREPANCIA REPORTADA: {total_mermas} uds. mermadas en transporte]"
+        t.observacion = (t.observacion or "") + obs_extra
+    if req.observacion:
+        t.observacion = (t.observacion or "") + f" | Obs Destino: {req.observacion}"
+
+    db.commit()
+    db.refresh(t)
+    return _obtener_traspaso_impl(t.id, db)
+
+
 def _cancelar_traspaso_impl(traspaso_id: int, db: Session = Depends(get_db)) -> TraspasoResponse:
     t = db.query(Traspaso).filter(Traspaso.id == traspaso_id).first()
     if not t:
@@ -348,6 +601,7 @@ def _cancelar_traspaso_impl(traspaso_id: int, db: Session = Depends(get_db)) -> 
                 InventarioSucursal.sucursal_id == t.sucursal_origen_id,
                 InventarioSucursal.variante_id == d.variante_id
             ).first()
+
             if inv_orig:
                 stock_ant = inv_orig.stock_fisico
                 inv_orig.stock_fisico += d.cantidad
@@ -369,14 +623,29 @@ def _cancelar_traspaso_impl(traspaso_id: int, db: Session = Depends(get_db)) -> 
     return _obtener_traspaso_impl(t.id, db)
 
 
-# Registrar endpoints
+# ─── Registro de Endpoints en Routers ─────────────────────────────────────────
+
 for r in [router, router_compat]:
+    r.add_api_route(
+        "/metricas",
+        _metricas_traspasos_impl,
+        methods=["GET"],
+        response_model=TraspasoMetricasResponse,
+        summary="KPIs y métricas de traspasos inter-sucursales"
+    )
+    r.add_api_route(
+        "/variantes-disponibles/{sucursal_id}",
+        _variantes_disponibles_sucursal_impl,
+        methods=["GET"],
+        response_model=List[dict],
+        summary="Listar variantes disponibles en stock de sucursal para transferir"
+    )
     r.add_api_route(
         "/",
         _listar_traspasos_impl,
         methods=["GET"],
         response_model=List[TraspasoResponse],
-        summary="Listar traspasos entre sucursales"
+        summary="Listar traspasos entre sucursales con filtro por estado y sucursal"
     )
     r.add_api_route(
         "/",
@@ -384,14 +653,21 @@ for r in [router, router_compat]:
         methods=["POST"],
         response_model=TraspasoResponse,
         status_code=status.HTTP_201_CREATED,
-        summary="Registrar envío o solicitud de traspaso entre tiendas"
+        summary="Registrar envío o requerimiento de traspaso entre tiendas"
     )
     r.add_api_route(
         "/{traspaso_id}",
         _obtener_traspaso_impl,
         methods=["GET"],
         response_model=TraspasoResponse,
-        summary="Detalle del traspaso con desglose de prendas"
+        summary="Detalle del traspaso con desglose de prendas, guía y QR"
+    )
+    r.add_api_route(
+        "/{traspaso_id}/guia-remision",
+        _obtener_traspaso_impl,
+        methods=["GET"],
+        response_model=TraspasoResponse,
+        summary="Consultar Guía de Remisión Oficial con código QR"
     )
     r.add_api_route(
         "/{traspaso_id}/despachar",
@@ -409,10 +685,16 @@ for r in [router, router_compat]:
             summary="Confirmar recepción en destino (sumar al inventario local)"
         )
     r.add_api_route(
+        "/{traspaso_id}/confirmar-recepcion-discrepancia",
+        _confirmar_recepcion_discrepancia_impl,
+        methods=["POST"],
+        response_model=TraspasoResponse,
+        summary="Confirmar recepción con reporte de discrepancia o mermas (Flujo 6a)"
+    )
+    r.add_api_route(
         "/{traspaso_id}/cancelar",
         _cancelar_traspaso_impl,
         methods=["POST"],
         response_model=TraspasoResponse,
-        summary="Cancelar traspaso y restituir existencias"
+        summary="Cancelar traspaso y restituir existencias a origen"
     )
-

@@ -120,6 +120,21 @@ def _normalizar_media_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
+def _sync_to_frontend_assets(filename: str, source_path: str):
+    import shutil
+    candidate_dirs = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "fashionstore-frontend", "src", "assets", "images", "products"),
+        os.path.join(os.path.dirname(__file__), "..", "frontend_tienda", "src", "assets", "images", "products"),
+    ]
+    for c in candidate_dirs:
+        norm = os.path.normpath(c)
+        if os.path.isdir(norm):
+            try:
+                shutil.copy2(source_path, os.path.join(norm, filename))
+            except Exception:
+                pass
+
+
 def _formatear_producto_angular(
     ropa: Ropa,
     db: Session = None,
@@ -466,6 +481,8 @@ async def upload_foto_prenda(ropa_id: int, archivo: UploadFile = File(...), db: 
     with open(filepath, "wb") as f:
         f.write(await archivo.read())
     
+    _sync_to_frontend_assets(filename, filepath)
+    
     ropa.imagen_uri = f"/static/uploads/{filename}"
     db.commit()
     db.refresh(ropa)
@@ -489,6 +506,8 @@ async def upload_modelo_3d_prenda(ropa_id: int, archivo: UploadFile = File(...),
     
     with open(filepath, "wb") as f:
         f.write(await archivo.read())
+    
+    _sync_to_frontend_assets(filename, filepath)
     
     ropa.modelo_3d_uri = f"/static/uploads/{filename}"
     db.commit()
@@ -961,6 +980,8 @@ async def upload_multimedia_compat(
     with open(filepath, "wb") as f:
         f.write(await archivo.read())
     
+    _sync_to_frontend_assets(filename, filepath)
+    
     url_guardada = f"/static/uploads/{filename}"
     if tipo == "realidad_aumentada" or ext in [".glb", ".gltf", ".obj", ".fbx"]:
         ropa.modelo_3d_uri = url_guardada
@@ -1195,6 +1216,8 @@ async def subir_imagen_variante_compat(
     
     with open(filepath, "wb") as f:
         f.write(await archivo.read())
+    
+    _sync_to_frontend_assets(filename, filepath)
         
     url_guardada = f"/static/uploads/{filename}"
     var.imagen_url = url_guardada

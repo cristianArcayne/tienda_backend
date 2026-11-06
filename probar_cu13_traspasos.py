@@ -61,19 +61,18 @@ var = db.query(VariantePrenda).join(InventarioSucursal).filter(
     InventarioSucursal.stock_fisico >= 5
 ).first()
 
-if not var:
-    # Aprovisionar stock en origen si es necesario
-    var = db.query(VariantePrenda).first()
-    inv = db.query(InventarioSucursal).filter(
-        InventarioSucursal.sucursal_id == suc_origen.id,
-        InventarioSucursal.variante_id == var.id
-    ).first()
-    if not inv:
-        inv = InventarioSucursal(sucursal_id=suc_origen.id, variante_id=var.id, stock_fisico=20, stock_reservado=0, stock_minimo=5)
-        db.add(inv)
-    else:
-        inv.stock_fisico = 20
-    db.commit()
+# Garantizar stock amplio en origen para todas las pruebas
+inv_orig_setup = db.query(InventarioSucursal).filter(
+    InventarioSucursal.sucursal_id == suc_origen.id,
+    InventarioSucursal.variante_id == var.id
+).first()
+if not inv_orig_setup:
+    inv_orig_setup = InventarioSucursal(sucursal_id=suc_origen.id, variante_id=var.id, stock_fisico=50, stock_reservado=0, stock_minimo=5)
+    db.add(inv_orig_setup)
+else:
+    inv_orig_setup.stock_fisico = 50
+    inv_orig_setup.stock_reservado = 0
+db.commit()
 
 var_id = var.id
 print(f"[*] Escenario: Origen='{suc_origen.nombre}' (ID #{suc_origen.id}) -> Destino='{suc_destino.nombre}' (ID #{suc_destino.id})")
@@ -255,6 +254,82 @@ if res_cancel.status_code == 200:
         fallo("No se restituyó el stock a origen tras la cancelación.")
 else:
     fallo(f"Error cancelando traspaso: {res_cancel.text}")
+
+# =============================================================================
+# PRUEBA 6: GUÍA DE REMISIÓN OFICIAL Y CÓDIGO QR DE TRANSPORTE
+# =============================================================================
+paso("CP-CU13-06", "Emisión de Guía de Remisión Oficial y QR de Transporte")
+res_guia = client.get(f"/api/v1/traspasos/{traspaso_id}/guia-remision")
+if res_guia.status_code == 200:
+    g_data = res_guia.json()
+    codigo_guia = g_data.get("guia_remision_codigo")
+    qr_data = g_data.get("guia_remision_qr")
+    if codigo_guia and codigo_guia.startswith("REM-"):
+        exito(f"Guía de Remisión generada: Código='{codigo_guia}'")
+    else:
+        fallo(f"Código de guía inválido: {codigo_guia}")
+    if qr_data and qr_data.startswith("data:image/png;base64,"):
+        exito(f"Código QR oficial para chofer/remisión emitido ({len(qr_data)} bytes base64).")
+    else:
+        fallo("No se generó el código QR de remisión.")
+else:
+    fallo(f"Error consultando guía de remisión: {res_guia.text}")
+
+# =============================================================================
+# PRUEBA 7: FLUJO ALTERNATIVO 6a - RECEPCIÓN CON DISCREPANCIA / MERMA
+# =============================================================================
+paso("CP-CU13-07", "Flujo Alternativo 6a: Recepción con Discrepancia/Merma en Transporte")
+res_t3 = client.post("/api/v1/traspasos/", json={
+    "sucursal_origen_id": suc_origen.id,
+    "sucursal_destino_id": suc_destino.id,
+    "observacion": "Envío de 5 prendas sujeto a auditoría de arribo",
+    "despachar_inmediato": True,
+    "detalles": [{"variante_id": var_id, "cantidad": 5}]
+})
+if res_t3.status_code != 201:
+    fallo(f"Error creando traspaso para prueba 7: {res_t3.text}")
+t3_id = res_t3.json()["id"]
+
+# Recepcionar con 4 conformes y 1 prenda rota/merma
+res_disc = client.post(f"/api/v1/traspasos/{t3_id}/confirmar-recepcion-discrepancia", json={
+    "observacion": "Paquete llegó con 1 prenda rota por roce en transporte",
+    "recibido_por_ci": "EMP-DESTINO-01",
+    "detalles": [{
+        "variante_id": var_id,
+        "cantidad_recibida_conforme": 4,
+        "cantidad_danada_o_merma": 1,
+        "motivo_merma": "Prenda rasgada durante el traslado inter-tiendas"
+    }]
+})
+if res_disc.status_code == 200:
+    d_data = res_disc.json()
+    exito(f"Recepción con discrepancia registrada. Estado: '{d_data['estado']}'")
+    exito(f"Observación auditada: '{d_data['observacion']}'")
+    
+    # Verificar movimiento Kardex de MERMA
+    db.expire_all()
+    mov_merma = db.query(MovimientoInventario).filter(
+        MovimientoInventario.sucursal_id == suc_destino.id,
+        MovimientoInventario.tipo_movimiento == "MERMA"
+    ).order_by(MovimientoInventario.id.desc()).first()
+    if mov_merma and "Discrepancia/Merma" in mov_merma.motivo:
+        exito(f"Auditoría Kardex confirmada en PostgreSQL: Movimiento #{mov_merma.id} | Tipo='{mov_merma.tipo_movimiento}' | Cantidad={mov_merma.cantidad}")
+    else:
+        fallo("No se registró el movimiento de merma en el inventario.")
+else:
+    fallo(f"Error procesando recepción con discrepancia: {res_disc.text}")
+
+# =============================================================================
+# PRUEBA 8: MÉTRICAS LOGÍSTICAS DE TRASPASOS EN VIVO
+# =============================================================================
+paso("CP-CU13-08", "Consulta de Métricas y KPIs Logísticos de Traspasos")
+res_met = client.get("/api/v1/traspasos/metricas")
+if res_met.status_code == 200:
+    m_data = res_met.json()
+    exito(f"Métricas obtenidas: Total Traspasos={m_data['total_traspasos']}, En Tránsito={m_data['en_transito_count']}, Recibidos={m_data['recibidos_count']}, Total Prendas={m_data['total_prendas_trasladadas']}")
+    exito(f"Sucursal más activa: '{m_data['sucursal_mas_activa']}'")
+else:
+    fallo(f"Error obteniendo métricas: {res_met.text}")
 
 db.close()
 

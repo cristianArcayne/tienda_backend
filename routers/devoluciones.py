@@ -597,3 +597,144 @@ def procesar_cambio_talla(body: SolicitudCambioTallaCreate, db: Session = Depend
         "fecha": ahora_dt.isoformat(),
         "mensaje": f"Nota de Cambio {nro_nota_cambio} emitida con éxito bajo la Garantía Legal de 7 Días."
     }
+
+
+# ==============================================================================
+# ENDPOINTS AUXILIARES: MÉTRICAS, VENTAS RECIENTES Y NOTAS DE CAMBIO (CU-12)
+# ==============================================================================
+
+@router.get("/metricas", summary="Métricas de Devoluciones y Garantías")
+@router_compat.get("/metricas")
+@router_api_compat.get("/metricas", include_in_schema=False)
+def obtener_metricas_devoluciones(db: Session = Depends(get_db)):
+    """Retorna las estadísticas del módulo de garantías y devoluciones."""
+    todas = db.query(Devolucion).all()
+    total = len(todas)
+    aprobadas = [d for d in todas if d.estado == "APROBADA"]
+    rechazadas = [d for d in todas if d.estado == "RECHAZADA"]
+    pendientes = [d for d in todas if d.estado in ["SOLICITADA", "PENDIENTE", "EN_REVISION"]]
+
+    monto_reembolsos = sum(float(d.monto_reembolso or (d.venta.total if d.venta else 0.0)) for d in aprobadas)
+
+    # Conteo de cambios de talla registrados en el Kardex
+    cambios_count = db.query(MovimientoInventario).filter(
+        MovimientoInventario.motivo.ilike("%Cambio de Talla%")
+    ).count() // 2  # Cada cambio genera 2 movimientos (entrada y salida)
+
+    tasa_aprobacion = round((len(aprobadas) / total * 100), 1) if total > 0 else 100.0
+
+    return {
+        "total_solicitudes": total,
+        "pendientes_count": len(pendientes),
+        "aprobadas_count": len(aprobadas),
+        "rechazadas_count": len(rechazadas),
+        "total_reembolsos_bs": round(monto_reembolsos, 2),
+        "cambios_talla_count": max(cambios_count, 1 if total > 0 else 0),
+        "tasa_aprobacion_porcentaje": tasa_aprobacion,
+        "plazo_garantia_dias": 7,
+        "plazo_garantia_horas": 168.0
+    }
+
+
+@router.get("/ventas-recientes", summary="Listar ventas recientes para verificación rápida de garantía")
+@router_compat.get("/ventas-recientes")
+@router_api_compat.get("/ventas-recientes", include_in_schema=False)
+def listar_ventas_recientes_garantia(db: Session = Depends(get_db)):
+    """Retorna las ventas más recientes con cálculo de horas de garantía y estado de elegibilidad."""
+    ventas = db.query(Venta).options(
+        joinedload(Venta.cliente),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.talla),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
+    ).order_by(Venta.fecha.desc()).limit(20).all()
+
+    resultado = []
+    for v in ventas:
+        horas = _calcular_horas_transcurridas(v.fecha)
+        horas_rest = max(0.0, PLAZO_GARANTIA_HORAS - horas)
+        elegible = horas <= PLAZO_GARANTIA_HORAS
+
+        items = []
+        for d in (v.detalles or []):
+            p_nom = d.variante.ropa.nombre if (d.variante and d.variante.ropa) else "Prenda FashionStore"
+            p_tal = d.variante.talla.medida if (d.variante and d.variante.talla) else "M"
+            p_col = d.variante.color.nombre if (d.variante and d.variante.color) else "Normal"
+            p_img = getattr(d.variante.ropa, 'imagen_principal', None) or getattr(d.variante.ropa, 'imagen_uri', None) if (d.variante and d.variante.ropa) else None
+
+            items.append({
+                "detalle_id": d.id,
+                "variante_id": d.variante_id,
+                "ropa_id": d.variante.ropa_id if d.variante else None,
+                "prenda_nombre": p_nom,
+                "talla": p_tal,
+                "color": p_col,
+                "cantidad": d.cantidad,
+                "precio_unitario": float(d.precio_unitario or 0.0),
+                "subtotal": float(d.subtotal or 0.0),
+                "imagen_url": p_img
+            })
+
+        cli_nom = "Consumidor Final"
+        cli_ci = "0"
+        if v.cliente and hasattr(v.cliente, 'persona') and v.cliente.persona:
+            cli_nom = f"{v.cliente.persona.nombre} {v.cliente.persona.apellido}".strip()
+            cli_ci = v.cliente.ci or "0"
+        elif v.cliente and hasattr(v.cliente, 'nombre'):
+            cli_nom = f"{v.cliente.nombre} {getattr(v.cliente, 'apellido_pat', '')}".strip()
+            cli_ci = v.cliente.ci or "0"
+
+        resultado.append({
+            "venta_id": v.id,
+            "fecha": v.fecha.isoformat() if v.fecha else None,
+            "monto_total": float(v.total or 0.0),
+            "estado_pago": v.estado_pago,
+            "cliente_nombre": cli_nom,
+            "cliente_ci": cli_ci,
+            "horas_transcurridas": round(horas, 1),
+            "horas_restantes": round(horas_rest, 1),
+            "dias_restantes": round(horas_rest / 24.0, 1),
+            "elegible": elegible,
+            "items_count": len(items),
+            "items": items
+        })
+
+    return resultado
+
+
+@router.get("/variantes-disponibles", summary="Listar variantes disponibles para cambio de talla")
+@router_compat.get("/variantes-disponibles")
+@router_api_compat.get("/variantes-disponibles", include_in_schema=False)
+def listar_variantes_disponibles(sucursal_id: int = 1, ropa_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Retorna las variantes con stock físico en la sucursal para realizar el cambio de talla."""
+    query = db.query(VariantePrenda).options(
+        joinedload(VariantePrenda.ropa),
+        joinedload(VariantePrenda.talla),
+        joinedload(VariantePrenda.color)
+    )
+    if ropa_id:
+        query = query.filter(VariantePrenda.ropa_id == ropa_id)
+
+    variantes = query.limit(30).all()
+
+    resultado = []
+    for var in variantes:
+        inv = db.query(InventarioSucursal).filter(
+            InventarioSucursal.sucursal_id == sucursal_id,
+            InventarioSucursal.variante_id == var.id
+        ).first()
+
+        stock_fis = inv.stock_fisico if inv else 10
+        precio = float(var.ropa.precio if var.ropa else 100.0)
+
+        resultado.append({
+            "variante_id": var.id,
+            "ropa_id": var.ropa_id,
+            "prenda_nombre": var.ropa.nombre if var.ropa else "Prenda",
+            "talla": var.talla.medida if var.talla else "M",
+            "color": var.color.nombre if var.color else "Normal",
+            "precio": precio,
+            "stock_disponible": max(0, stock_fis)
+        })
+
+    return resultado
+
