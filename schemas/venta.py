@@ -67,6 +67,8 @@ class VentaPOSCreate(BaseModel):
     monto_recibido: Optional[float] = None
     descuento_total: Optional[float] = 0.0
     items: List[ItemVentaCreate]
+    offline_uuid: Optional[str] = None
+    codigo_transaccion: Optional[str] = None
 
 
 class VentaEcommerceCreate(BaseModel):

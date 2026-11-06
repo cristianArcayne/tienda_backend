@@ -349,7 +349,9 @@ class ItemOperacionDto(BaseModel):
 @router_compat.get("/{cliente_ci}/")
 @router_compat.get("/{cliente_ci}")
 def mi_carrito_compat(cliente_ci: Optional[str] = "2001", db: Session = Depends(get_db)):
-    cliente = _obtener_o_crear_cliente(db, cliente_ci or "2001")
+    if not cliente_ci or cliente_ci in ["mi_carrito", "descargar_pdf", "default", "guest", "null", "undefined"]:
+        cliente_ci = "2001"
+    cliente = _obtener_o_crear_cliente(db, cliente_ci)
     carrito = _obtener_o_crear_carrito(db, cliente.ci)
     return _formatear_carrito_frontend(carrito)
 

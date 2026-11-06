@@ -55,6 +55,8 @@ from routers.suscripciones import router as suscripciones_router
 from routers.sugerencias_compra import router as sugerencias_compra_router
 from routers.devoluciones import router as devoluciones_router, router_compat as devoluciones_compat_router, router_api_compat as devoluciones_api_compat_router
 from routers.stripe_pagos import router as stripe_pagos_router, router_compat as stripe_pagos_compat_router
+from routers.cobro_qr import router as cobro_qr_router, compat_router as cobro_qr_compat_router
+from routers.backup import router as backup_router, router_compat as backup_compat_router, router_seguridad_compat as backup_seguridad_compat_router
 
 from sqlalchemy import text
 
@@ -230,6 +232,11 @@ app.include_router(devoluciones_compat_router)
 app.include_router(devoluciones_api_compat_router)
 app.include_router(stripe_pagos_router)
 app.include_router(stripe_pagos_compat_router)
+app.include_router(cobro_qr_router)
+app.include_router(cobro_qr_compat_router)
+app.include_router(backup_router)
+app.include_router(backup_compat_router)
+app.include_router(backup_seguridad_compat_router)
 
 @app.get("/", tags=["Estado del Sistema"])
 def raiz():

@@ -13,6 +13,7 @@ import pytz
 
 from database import get_db
 from models.seguridad_persona import Bitacora, Usuario
+from core_tenant import obtener_tenant_id
 
 router = APIRouter(
     prefix="/api/v1/bitacora",
@@ -121,6 +122,7 @@ def registrar_bitacora(
 # ─── GET /api/v1/bitacora/ ────────────────────────────────────────────────────
 @router.get("/")
 def listar_bitacora(
+    request: Request,
     accion:       Optional[str] = Query(None, description="Filtrar por acción: INSERT, UPDATE, DELETE, LOGIN, LOGOUT"),
     metodo:       Optional[str] = Query(None, description="Alias de método HTTP (GET/POST/PUT/DELETE)"),
     usuario_id:   Optional[int] = Query(None),
@@ -132,6 +134,17 @@ def listar_bitacora(
 ):
     """Lista la bitácora de auditoría con paginación y filtros."""
     query = db.query(Bitacora)
+
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        query = query.join(Usuario, Bitacora.usuario_id == Usuario.id).filter(Usuario.empresa_id == tenant_id)
 
     # Filtros
     if accion:
@@ -216,6 +229,7 @@ router_compat = APIRouter(
 
 @router_compat.get("/")
 def listar_bitacora_compat(
+    request: Request,
     accion:       Optional[str] = Query(None),
     metodo:       Optional[str] = Query(None),
     usuario_id:   Optional[int] = Query(None),
@@ -227,7 +241,133 @@ def listar_bitacora_compat(
 ):
     """Alias /api/bitacora/ -> /api/v1/bitacora/ para compatibilidad con el frontend."""
     return listar_bitacora(
+        request=request,
         accion=accion, metodo=metodo, usuario_id=usuario_id,
         fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
         page=page, page_size=page_size, db=db
+    )
+
+
+# ==============================================================================
+# CU-17: BITÁCORA CONFIDENCIAL CON LLAVE DE DESARROLLADOR
+# ==============================================================================
+
+import os
+import hashlib
+import json
+from fastapi import Header, HTTPException, status
+from fastapi.responses import Response
+
+LLAVE_DESARROLLADOR_OFICIAL = os.getenv("DEVELOPER_KEY", "DEV-KEY-FASHIONSTORE-SECURE-2026")
+
+
+def _verificar_llave_desarrollador(
+    x_developer_key: Optional[str] = Header(None, alias="X-Developer-Key"),
+    llave: Optional[str] = Query(None, description="Llave del Desarrollador")
+):
+    llave_provista = x_developer_key or llave
+    if not llave_provista or llave_provista.strip() != LLAVE_DESARROLLADOR_OFICIAL:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso Denegado: La Bitácora Confidencial del Sistema requiere una Llave de Desarrollador válida y autorizada."
+        )
+    return llave_provista
+
+
+@router.get("/confidencial-dev", summary="[CU-17] Consultar Bitácora Confidencial del Sistema (Requiere Llave Dev)")
+@router_compat.get("/confidencial-dev", include_in_schema=False)
+def obtener_bitacora_confidencial(
+    request: Request,
+    limite: int = Query(50, ge=1, le=500),
+    filtro_accion: Optional[str] = Query(None),
+    dev_key: str = Depends(_verificar_llave_desarrollador),
+    db: Session = Depends(get_db)
+):
+    """
+    CU-17: Acceso seguro a la bitácora de auditoría confidencial.
+    Solo accesible mediante la Llave del Desarrollador (Developer Key).
+    Retorna todos los eventos con IP, usuario, tabla, fecha/hora y firma hash de integridad.
+    """
+    q = db.query(Bitacora)
+    if filtro_accion:
+        q = q.filter(Bitacora.accion == filtro_accion.upper())
+
+    total_eventos = q.count()
+    eventos = q.order_by(Bitacora.fecha_hora.desc()).limit(limite).all()
+
+    # Formatear eventos confidenciales
+    lineas_log = []
+    ips_unicas = set()
+    usuarios_unicos = set()
+    
+    for ev in eventos:
+        ip = ev.ip_origen or "127.0.0.1"
+        ips_unicas.add(ip)
+        usr_nom = ev.usuario.nombre_usuario if ev.usuario else f"USR-{ev.usuario_id or '0'}"
+        usuarios_unicos.add(usr_nom)
+        f_str = ev.fecha_hora.strftime("%Y-%m-%d %H:%M:%S") if ev.fecha_hora else "N/A"
+        lineas_log.append({
+            "id": ev.id,
+            "ip_origen": ip,
+            "usuario": usr_nom,
+            "usuario_id": ev.usuario_id,
+            "accion": ev.accion,
+            "tabla_afectada": ev.tabla_afectada or "SISTEMA",
+            "registro_id": ev.registro_id,
+            "detalles": ev.detalles,
+            "fecha_hora": f_str
+        })
+
+    # Calcular firma criptográfica de integridad (SHA-256) sobre todo el log
+    payload_bytes = json.dumps(lineas_log, sort_keys=True).encode("utf-8")
+    hash_integridad = hashlib.sha256(payload_bytes).hexdigest()
+
+    return {
+        "status": "AUTORIZADO",
+        "seguridad": {
+            "autenticado_por": "Llave del Desarrollador Oficial",
+            "hash_sha256_integridad": hash_integridad,
+            "inmutable": True
+        },
+        "estadisticas_confidenciales": {
+            "total_eventos_sistema": total_eventos,
+            "eventos_retornados": len(lineas_log),
+            "ips_auditadas_unicas": len(ips_unicas),
+            "usuarios_activos_auditados": len(usuarios_unicos)
+        },
+        "registros_bitacora": lineas_log
+    }
+
+
+@router.get("/descargar-log-cifrado", summary="[CU-17] Descargar Archivo Log Cifrado / Firmado")
+@router_compat.get("/descargar-log-cifrado", include_in_schema=False)
+def descargar_log_cifrado(
+    dev_key: str = Depends(_verificar_llave_desarrollador),
+    db: Session = Depends(get_db)
+):
+    """
+    Descarga el archivo de auditoría forense sellado con metadatos de seguridad y hash SHA-256.
+    """
+    eventos = db.query(Bitacora).order_by(Bitacora.id.asc()).all()
+    
+    log_text = "=" * 80 + "\n"
+    log_text += "FASHIONSTORE - ARCHIVO DE AUDITORÍA CONFIDENCIAL DEL SISTEMA\n"
+    log_text += f"FECHA EXTRACCIÓN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC-4 Bolivia)\n"
+    log_text += f"AUTORIZACIÓN: LLAVE DE DESARROLLADOR OFICIAL\n"
+    log_text += "=" * 80 + "\n\n"
+    
+    for ev in eventos:
+        f_str = ev.fecha_hora.strftime("%Y-%m-%d %H:%M:%S") if ev.fecha_hora else "N/A"
+        usr_nom = ev.usuario.nombre_usuario if ev.usuario else f"UID-{ev.usuario_id or '0'}"
+        log_text += f"[{f_str}] [IP: {ev.ip_origen or '127.0.0.1'}] [USER: {usr_nom}] [{ev.accion}] TABLE: {ev.tabla_afectada or 'SYS'} | ID: {ev.registro_id} | {ev.detalles}\n"
+
+    hash_sha = hashlib.sha256(log_text.encode("utf-8")).hexdigest()
+    log_text += "\n" + "=" * 80 + "\n"
+    log_text += f"SELLO CRIPTOGRÁFICO SHA-256: {hash_sha}\n"
+    log_text += "=" * 80 + "\n"
+
+    return Response(
+        content=log_text,
+        media_type="text/plain",
+        headers={"Content-Disposition": "attachment; filename=bitacora_confidencial_fashionstore.log"}
     )

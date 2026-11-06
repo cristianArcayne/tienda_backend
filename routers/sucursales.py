@@ -21,6 +21,8 @@ from schemas.sucursal import (
 )
 from routers.bitacora import registrar_bitacora
 
+from core_tenant import obtener_tenant_id, verificar_limite_sucursales
+
 router = APIRouter(
     prefix="/api/v1/sucursales",
     tags=["CU06. Gestionar sucursales de la cadena"]
@@ -31,10 +33,24 @@ router = APIRouter(
     "/",
     response_model=List[SucursalResponse],
     summary="Listar todas las sucursales de la cadena",
-    description="Recupera todas las tiendas físicas registradas en las diferentes ciudades."
+    description="Recupera las tiendas físicas registradas para la empresa actual o todas las sucursales."
 )
-def listar_sucursales(db: Session = Depends(get_db)):
-    return db.query(Sucursal).order_by(Sucursal.id.asc()).all()
+def listar_sucursales(
+    request: Request,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(obtener_tenant_id)
+):
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    query = db.query(Sucursal).options(joinedload(Sucursal.empresa))
+    if tenant_header:
+        return query.filter(Sucursal.empresa_id == tenant_id).order_by(Sucursal.id.asc()).all()
+    return query.order_by(Sucursal.id.asc()).all()
 
 
 @router.get(
@@ -58,14 +74,27 @@ def obtener_sucursal(sucursal_id: int, db: Session = Depends(get_db)):
     response_model=SucursalResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Registrar nueva sucursal",
-    description="Registra una nueva tienda física en el sistema validando no duplicidad."
+    description="Registra una nueva tienda física en el sistema validando límites del Plan SaaS y no duplicidad."
 )
-def crear_sucursal(sucursal_in: SucursalCreate, request: Request, db: Session = Depends(get_db)):
+def crear_sucursal(
+    sucursal_in: SucursalCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(obtener_tenant_id)
+):
+    # Si viene sucursal_in.empresa_id especificado (por ej. Superadmin), asignamos a esa empresa; de lo contrario al tenant_id
+    target_empresa_id = int(sucursal_in.empresa_id) if (sucursal_in.empresa_id and sucursal_in.empresa_id > 0) else tenant_id
+
+    # 1. Validar límite estricto de sucursales según el Plan de la Empresa destino
+    verificar_limite_sucursales(target_empresa_id, db)
+
+    # 2. Validar no duplicidad dentro de la misma empresa
     existe_tienda = db.query(
         exists().where(
             and_(
                 Sucursal.nombre.ilike(sucursal_in.nombre),
-                Sucursal.ciudad.ilike(sucursal_in.ciudad)
+                Sucursal.ciudad.ilike(sucursal_in.ciudad),
+                Sucursal.empresa_id == target_empresa_id
             )
         )
     ).scalar()
@@ -73,20 +102,24 @@ def crear_sucursal(sucursal_in: SucursalCreate, request: Request, db: Session = 
     if existe_tienda:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Ya existe una sucursal con el nombre '{sucursal_in.nombre}' en '{sucursal_in.ciudad}'."
+            detail=f"Ya existe una sucursal con el nombre '{sucursal_in.nombre}' en '{sucursal_in.ciudad}' para esta empresa."
         )
 
     nueva_sucursal = Sucursal(
         nombre=sucursal_in.nombre,
         ciudad=sucursal_in.ciudad,
         direccion=sucursal_in.direccion,
-        telefono=sucursal_in.telefono
+        telefono=sucursal_in.telefono,
+        empresa_id=target_empresa_id
     )
     db.add(nueva_sucursal)
     db.flush()
 
-    # Inicializar inventario en 0 para todas las variantes existentes
-    variantes = db.query(VariantePrenda).all()
+    # Inicializar inventario en 0 para variantes de la empresa de la sucursal
+    query_vars = db.query(VariantePrenda).join(Ropa, VariantePrenda.ropa_id == Ropa.id)
+    if target_empresa_id:
+        query_vars = query_vars.filter(Ropa.empresa_id == target_empresa_id)
+    variantes = query_vars.all()
     for var in variantes:
         db.add(InventarioSucursal(
             sucursal_id=nueva_sucursal.id,
@@ -96,9 +129,9 @@ def crear_sucursal(sucursal_in: SucursalCreate, request: Request, db: Session = 
         ))
 
     db.commit()
-    db.refresh(nueva_sucursal)
+    nueva_sucursal = db.query(Sucursal).options(joinedload(Sucursal.empresa)).filter(Sucursal.id == nueva_sucursal.id).first()
     
-    registrar_bitacora(db, "INSERT", "sucursales", str(nueva_sucursal.id), f"Sucursal creada: {nueva_sucursal.nombre} ({nueva_sucursal.ciudad})", request=request)
+    registrar_bitacora(db, "INSERT", "sucursales", str(nueva_sucursal.id), f"Sucursal creada: {nueva_sucursal.nombre} ({nueva_sucursal.ciudad}) - Empresa #{target_empresa_id}", request=request)
     
     return nueva_sucursal
 
@@ -108,12 +141,18 @@ def actualizar_sucursal(sucursal_id: int, sucursal_in: SucursalCreate, request: 
     sucursal = db.query(Sucursal).filter(Sucursal.id == sucursal_id).first()
     if not sucursal:
         raise HTTPException(status_code=404, detail="Sucursal no encontrada")
+    
+    # Si se actualiza la empresa de la sucursal, validar límite en la nueva empresa
+    if sucursal_in.empresa_id and sucursal_in.empresa_id > 0 and sucursal_in.empresa_id != sucursal.empresa_id:
+        verificar_limite_sucursales(sucursal_in.empresa_id, db)
+        sucursal.empresa_id = sucursal_in.empresa_id
+
     sucursal.nombre = sucursal_in.nombre
     sucursal.ciudad = sucursal_in.ciudad
     sucursal.direccion = sucursal_in.direccion
     sucursal.telefono = sucursal_in.telefono
     db.commit()
-    db.refresh(sucursal)
+    sucursal = db.query(Sucursal).options(joinedload(Sucursal.empresa)).filter(Sucursal.id == sucursal_id).first()
     
     registrar_bitacora(db, "UPDATE", "sucursales", str(sucursal.id), f"Sucursal actualizada: {sucursal.nombre} ({sucursal.ciudad})", request=request)
     
@@ -243,8 +282,12 @@ router_compat = APIRouter(
 
 @router_compat.get("/", response_model=List[SucursalResponse])
 @router_compat.get("", response_model=List[SucursalResponse])
-def listar_sucursales_compat(db: Session = Depends(get_db)):
-    return listar_sucursales(db=db)
+def listar_sucursales_compat(
+    request: Request,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(obtener_tenant_id)
+):
+    return listar_sucursales(request=request, db=db, tenant_id=tenant_id)
 
 @router_compat.get("/{sucursal_id}", response_model=SucursalResponse)
 @router_compat.get("/{sucursal_id}/", response_model=SucursalResponse)
@@ -253,8 +296,13 @@ def obtener_sucursal_compat(sucursal_id: int, db: Session = Depends(get_db)):
 
 @router_compat.post("/", response_model=SucursalResponse, status_code=status.HTTP_201_CREATED)
 @router_compat.post("", response_model=SucursalResponse, status_code=status.HTTP_201_CREATED)
-def crear_sucursal_compat(sucursal_in: SucursalCreate, request: Request, db: Session = Depends(get_db)):
-    return crear_sucursal(sucursal_in=sucursal_in, request=request, db=db)
+def crear_sucursal_compat(
+    sucursal_in: SucursalCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(obtener_tenant_id)
+):
+    return crear_sucursal(sucursal_in=sucursal_in, request=request, db=db, tenant_id=tenant_id)
 
 @router_compat.put("/{sucursal_id}", response_model=SucursalResponse)
 @router_compat.put("/{sucursal_id}/", response_model=SucursalResponse)

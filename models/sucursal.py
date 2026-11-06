@@ -33,6 +33,10 @@ class Sucursal(Base):
     traspasos_destino = relationship("Traspaso", foreign_keys="[Traspaso.sucursal_destino_id]", back_populates="sucursal_destino")
     empleados = relationship("Empleado", backref="sucursal")
 
+    @property
+    def empresa_nombre(self):
+        return self.empresa.razon_social if self.empresa else None
+
 
 class InventarioSucursal(Base):
     """

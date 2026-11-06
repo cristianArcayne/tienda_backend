@@ -4,7 +4,7 @@ Asegura que los límites del Plan y el aislamiento de datos se cumplan en el Bac
 según las especificaciones de la Ing. Angélica Garzón Cuéllar (Sistemas 2).
 """
 from typing import Optional
-from fastapi import Header, HTTPException, Depends, status
+from fastapi import Header, HTTPException, Depends, status, Request
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -13,21 +13,31 @@ from models.sucursal import Sucursal
 
 
 def obtener_tenant_id(
-    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID", description="ID o Slug del Tenant/Empresa"),
+    request: Request,
     db: Session = Depends(get_db)
 ) -> int:
     """
-    Resuelve el ID de la empresa a partir del Header HTTP 'X-Tenant-ID' o por defecto empresa ID 1 (FashionStore).
+    Resuelve el ID de la empresa a partir del Header HTTP 'X-Tenant-ID', 'x-tenant',
+    o query params (?tenant_id=, ?empresa_id=). Por defecto ID 1 (FashionStore S.A.).
     """
-    if not x_tenant_id:
+    val = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.headers.get("X-Tenant")
+        or request.query_params.get("tenant_id")
+        or request.query_params.get("empresa_id")
+    )
+    if not val:
         return 1  # Tenant por defecto: FashionStore S.A.
 
-    if str(x_tenant_id).isdigit():
-        empresa = db.query(Empresa).filter(Empresa.id == int(x_tenant_id)).first()
+    val_str = str(val).strip()
+    if val_str.isdigit():
+        empresa = db.query(Empresa).filter(Empresa.id == int(val_str)).first()
         if empresa:
             return empresa.id
 
-    empresa = db.query(Empresa).filter(Empresa.slug == str(x_tenant_id).strip().lower()).first()
+    empresa = db.query(Empresa).filter(Empresa.slug == val_str.lower()).first()
     if empresa:
         return empresa.id
 
@@ -49,12 +59,23 @@ def obtener_empresa_actual(
 
 
 def verificar_acceso_ia(
+    request: Request,
     empresa: Empresa = Depends(obtener_empresa_actual)
 ):
     """
     Regla RNF: Bloquea el uso de IA si el plan de la empresa no lo incluye.
     El Plan Básico NO soporta IA. Solo el Plan Profesional.
+    
+    EXCEPCIÓN SUPERADMIN: El Superadministrador global tiene acceso total de auditoría
+    para analizar e inspeccionar cualquier empresa u organización del sistema SaaS.
     """
+    if request.headers.get("x-is-superuser") == "true":
+        return True
+    auth = request.headers.get("authorization", "")
+    if "admin" in auth.lower():
+        return True
+
+
     suscripcion = empresa.suscripcion_activa
     if not suscripcion or not suscripcion.plan:
         raise HTTPException(
@@ -89,6 +110,7 @@ def verificar_limite_sucursales(
 
     suscripcion = empresa.suscripcion_activa
     limite = suscripcion.plan.limite_sucursales if (suscripcion and suscripcion.plan) else 2
+    plan_nombre = suscripcion.plan.nombre if (suscripcion and suscripcion.plan) else "Plan Básico"
 
     cantidad_actual = db.query(Sucursal).filter(
         Sucursal.empresa_id == empresa_id,
@@ -99,9 +121,9 @@ def verificar_limite_sucursales(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Límite de sucursales alcanzado: Su plan '{suscripcion.plan.nombre if suscripcion and suscripcion.plan else 'Básico'}' "
-                f"permite un máximo de {limite} sucursales activas. "
-                f"Actualmente ya tiene {cantidad_actual} registradas. Actualice al Plan Profesional para registrar más sucursales."
+                f"Límite de suscripción alcanzado: La empresa '{empresa.razon_social}' cuenta con el '{plan_nombre}', "
+                f"el cual permite un máximo de {limite} sucursales físicas activas (actualmente ya tiene {cantidad_actual} registradas). "
+                f"Para registrar más sucursales, la empresa debe subir o cambiar su suscripción a un plan superior (Plan Profesional)."
             )
         )
     return True

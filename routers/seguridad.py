@@ -82,8 +82,12 @@ def registrar_cliente(req: ClienteRegistroRequest, db: Session = Depends(get_db)
     )
 
 
+@router.post("/api/login", response_model=LoginResponse)
 @router.post("/api/login/", response_model=LoginResponse)
+@router.post("/api/v1/login", response_model=LoginResponse)
 @router.post("/api/v1/login/", response_model=LoginResponse)
+@router.post("/api/auth/login", response_model=LoginResponse)
+@router.post("/api/auth/login/", response_model=LoginResponse)
 def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     from sqlalchemy import func, or_
     clean_user = req.username.strip().lower() if req.username else ""
@@ -117,10 +121,12 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
                 refresh="refresh_admin_maestro",
                 usuario_id=admin_id,
                 username="admin",
-                nombre_completo="Administrador del Sistema",
+                nombre_completo="Administrador de la Plataforma SaaS",
                 is_superuser=True,
-                roles=["Administrador"],
-                permisos=["*"]
+                roles=["SuperAdmin", "Administrador"],
+                permisos=["*"],
+                empresa_id=None,
+                empresa_nombre="Plataforma Global (SaaS)"
             )
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
     
@@ -130,9 +136,10 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     # Generar token falso (simulado) para el MVP
     fake_token = f"jwt_{uuid.uuid4().hex}"
     
-    # Obtener rol
+    # Obtener rol y nivel de plataforma
     rol_nombre = usuario.rol.nombre if usuario.rol else "Usuario"
     es_admin = (rol_nombre.lower() in ["administrador", "admin"])
+    es_superadmin_plataforma = (usuario.nombre_usuario.lower() == "admin" or usuario.empresa_id is None) and es_admin
 
     # Registrar en bitácora el login
     registrar_bitacora(
@@ -145,6 +152,33 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
         request=request
     )
 
+    # Resolver permisos por rol
+    if es_admin:
+        lista_permisos = ["*"]
+    elif "cliente" in rol_nombre.lower():
+        lista_permisos = list(set([p.codename for p in (usuario.rol.permisos if usuario.rol else [])] + [
+            "inventario.view_catalogo",
+            "inventario.view_producto",
+            "inventario.view_producto_detalle",
+            "compras.view_compra",
+            "ia.view_alerta",
+            "seguridad.add_prediccion",
+            "notificaciones.view_notificacion",
+            "LEER_CATALOGO",
+            "COMPRAR"
+        ]))
+    elif "vendedor" in rol_nombre.lower() or "cajero" in rol_nombre.lower():
+        # Cajero / Vendedor: únicamente ventas, pedidos y cobros POS
+        base_vendedor = ["venta.view_venta", "venta.add_venta", "venta.change_venta"]
+        if usuario.rol and usuario.rol.permisos:
+            base_vendedor.extend([p.codename for p in usuario.rol.permisos])
+        lista_permisos = list(set(base_vendedor))
+    else:
+        if usuario.rol and usuario.rol.permisos:
+            lista_permisos = [p.codename for p in usuario.rol.permisos]
+        else:
+            lista_permisos = ["inventario.view_catalogo", "inventario.view_producto", "venta.view_venta"]
+
     return LoginResponse(
         success=True,
         access=fake_token,
@@ -156,27 +190,11 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
         apellido=usuario.persona.apellido_pat if usuario.persona else "",
         email=usuario.persona.correo if usuario.persona else "",
         telefono=usuario.persona.telefono if usuario.persona else "",
-        is_superuser=es_admin,
-        roles=[rol_nombre],
-        permisos=["*"] if es_admin else (
-            list(set([p.codename for p in usuario.rol.permisos] + [
-                "inventario.view_catalogo",
-                "inventario.view_producto",
-                "inventario.view_producto_detalle",
-                "compras.view_compra",
-                "ia.view_alerta",
-                "seguridad.add_prediccion",
-                "notificaciones.view_notificacion",
-                "LEER_CATALOGO",
-                "COMPRAR"
-            ])) if "cliente" in rol_nombre.lower() else (
-                [p.codename for p in usuario.rol.permisos] if (usuario.rol and usuario.rol.permisos) else [
-                    "inventario.view_catalogo",
-                    "inventario.view_producto",
-                    "venta.view_venta"
-                ]
-            )
-        )
+        is_superuser=es_superadmin_plataforma,
+        roles=["SuperAdmin", rol_nombre] if es_superadmin_plataforma else [rol_nombre],
+        permisos=lista_permisos,
+        empresa_id=None if es_superadmin_plataforma else usuario.empresa_id,
+        empresa_nombre="Plataforma Global (SaaS)" if es_superadmin_plataforma else (usuario.empresa.razon_social if (hasattr(usuario, 'empresa') and usuario.empresa) else None)
     )
 
 @router.post("/api/logout/")

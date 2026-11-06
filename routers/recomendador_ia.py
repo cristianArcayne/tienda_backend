@@ -23,15 +23,18 @@ from schemas.innovacion import (
     ChatMessageRequest,
     ChatMessageResponse
 )
+from core_tenant import verificar_acceso_ia
 
 router = APIRouter(
     prefix="/api/v1/ia",
-    tags=["CU17. Interactuar con recomendador inteligente (IA)"]
+    tags=["CU17. Interactuar con recomendador inteligente (IA)"],
+    dependencies=[Depends(verificar_acceso_ia)]
 )
 
 compat_router = APIRouter(
     prefix="/api/ia",
-    include_in_schema=False
+    include_in_schema=False,
+    dependencies=[Depends(verificar_acceso_ia)]
 )
 
 

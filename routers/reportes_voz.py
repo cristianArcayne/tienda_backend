@@ -21,9 +21,12 @@ from schemas.innovacion import (
 )
 
 
+from core_tenant import verificar_acceso_ia
+
 router = APIRouter(
     prefix="/api/v1/reportes-voz",
-    tags=["CU18. Generar reportes mediante comandos de voz"]
+    tags=["CU18. Generar reportes mediante comandos de voz"],
+    dependencies=[Depends(verificar_acceso_ia)]
 )
 
 

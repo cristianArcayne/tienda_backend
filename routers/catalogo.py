@@ -109,13 +109,23 @@ def _formatear_ropa(ropa: Ropa) -> RopaResponse:
 def _normalizar_media_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
+    # Limpiar cualquier dominio obsoleto de Render si quedó almacenado previamente
+    if "tienda-backend-kvfk.onrender.com" in url:
+        url = url.replace("https://tienda-backend-kvfk.onrender.com", "").replace("http://tienda-backend-kvfk.onrender.com", "")
     if url.startswith("/static/"):
-        backend_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("BACKEND_URL") or "https://tienda-backend-kvfk.onrender.com"
-        return f"{backend_url.rstrip('/')}{url}"
+        backend_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("BACKEND_URL")
+        if backend_url:
+            return f"{backend_url.rstrip('/')}{url}"
+        return url
     return url
 
 
-def _formatear_producto_angular(ropa: Ropa, db: Session = None, sucursal_id: Optional[int] = None) -> dict:
+def _formatear_producto_angular(
+    ropa: Ropa,
+    db: Session = None,
+    sucursal_id: Optional[int] = None,
+    tenant_sucursal_ids: Optional[set] = None
+) -> dict:
     """Formato compatible al 100% con Angular Producto / Multimedia / Variantes"""
     img_url = _normalizar_media_url(ropa.imagen_uri)
     m3d_url = _normalizar_media_url(ropa.modelo_3d_uri)
@@ -170,15 +180,19 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None, sucursal_id: Opt
         stock_total = 0
         if v.inventarios_sucursal:
             if sucursal_id:
-                stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in v.inventarios_sucursal if inv.sucursal_id == sucursal_id)
+                stock_total = sum(inv.stock_disponible if inv.stock_disponible is not None else (inv.stock_fisico or 0) for inv in v.inventarios_sucursal if inv.sucursal_id == sucursal_id)
+            elif tenant_sucursal_ids:
+                stock_total = sum(inv.stock_disponible if inv.stock_disponible is not None else (inv.stock_fisico or 0) for inv in v.inventarios_sucursal if inv.sucursal_id in tenant_sucursal_ids)
             else:
-                stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in v.inventarios_sucursal)
+                stock_total = sum(inv.stock_disponible if inv.stock_disponible is not None else (inv.stock_fisico or 0) for inv in v.inventarios_sucursal)
         elif db:
             if sucursal_id:
                 invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id, InventarioSucursal.sucursal_id == sucursal_id).all()
+            elif tenant_sucursal_ids:
+                invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id, InventarioSucursal.sucursal_id.in_(tenant_sucursal_ids)).all()
             else:
                 invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id).all()
-            stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in invs)
+            stock_total = sum(inv.stock_disponible if inv.stock_disponible is not None else (inv.stock_fisico or 0) for inv in invs)
         
         variantes_list.append({
             "id": v.id,
@@ -252,6 +266,8 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None, sucursal_id: Opt
 # ENDPOINTS REST CU07 (PRENDAS / ROPA / RECURSOS 3D)
 # ==============================================================================
 
+from core_tenant import obtener_tenant_id
+
 @router.get(
     "/",
     response_model=List[RopaResponse],
@@ -260,6 +276,7 @@ def _formatear_producto_angular(ropa: Ropa, db: Session = None, sucursal_id: Opt
 )
 @router.get("", response_model=List[RopaResponse])
 def listar_prendas(
+    request: Request,
     categoria_id: Optional[int] = Query(None, description="Filtrar por ID de categoría"),
     temporada_id: Optional[int] = Query(None, description="Filtrar por ID de temporada"),
     solo_ar: Optional[bool] = Query(None, description="Filtrar solo prendas con modelo 3D para AR"),
@@ -273,6 +290,21 @@ def listar_prendas(
         joinedload(Ropa.variantes).joinedload(VariantePrenda.color),
         joinedload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion)
     )
+
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        tiene_prendas = db.query(Ropa.id).filter(Ropa.empresa_id == tenant_id).first() is not None
+        if tiene_prendas:
+            query = query.filter(Ropa.empresa_id == tenant_id)
+        else:
+            query = query.filter(or_(Ropa.empresa_id == tenant_id, Ropa.empresa_id == 1, Ropa.empresa_id.is_(None)))
 
     if categoria_id:
         query = query.filter(Ropa.categoria_id == categoria_id)
@@ -322,15 +354,16 @@ def obtener_prenda(ropa_id: int, db: Session = Depends(get_db)):
     description="Registra una prenda en el catálogo validando que no existan duplicados de nombre comercial (Excepción A1)."
 )
 @router.post("", response_model=RopaResponse, status_code=status.HTTP_201_CREATED)
-def crear_prenda(prenda_in: RopaCreate, db: Session = Depends(get_db)):
+def crear_prenda(prenda_in: RopaCreate, request: Request, db: Session = Depends(get_db)):
+    tenant_id = obtener_tenant_id(request, db)
     duplicado = db.query(
-        exists().where(Ropa.nombre == prenda_in.nombre)
+        exists().where(Ropa.nombre == prenda_in.nombre, Ropa.empresa_id == tenant_id)
     ).scalar()
 
     if duplicado:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Excepción A1: Ya existe una prenda registrada con el nombre '{prenda_in.nombre}'."
+            detail=f"Excepción A1: Ya existe una prenda registrada con el nombre '{prenda_in.nombre}' para su empresa."
         )
 
     nueva_ropa = Ropa(
@@ -342,7 +375,8 @@ def crear_prenda(prenda_in: RopaCreate, db: Session = Depends(get_db)):
         categoria_id=prenda_in.categoria_id,
         temporada_id=prenda_in.temporada_id,
         proveedor_id=prenda_in.proveedor_id,
-        activo=True
+        activo=True,
+        empresa_id=tenant_id
     )
     db.add(nueva_ropa)
     db.commit()
@@ -364,7 +398,10 @@ def crear_prenda(prenda_in: RopaCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(def_var)
 
-    sucursales = db.query(Sucursal).all()
+    query_sucursales = db.query(Sucursal)
+    if tenant_id:
+        query_sucursales = query_sucursales.filter(Sucursal.empresa_id == tenant_id)
+    sucursales = query_sucursales.all()
     for suc in sucursales:
         db.add(InventarioSucursal(
             sucursal_id=suc.id,
@@ -432,7 +469,7 @@ async def upload_foto_prenda(ropa_id: int, archivo: UploadFile = File(...), db: 
     ropa.imagen_uri = f"/static/uploads/{filename}"
     db.commit()
     db.refresh(ropa)
-    return {"message": "Fotografía subida exitosamente", "imagen_uri": ropa.imagen_uri}
+    return {"message": "Fotografía subida exitosamente", "imagen_uri": _normalizar_media_url(ropa.imagen_uri)}
 
 
 @router.post("/{ropa_id}/upload-3d")
@@ -456,7 +493,7 @@ async def upload_modelo_3d_prenda(ropa_id: int, archivo: UploadFile = File(...),
     ropa.modelo_3d_uri = f"/static/uploads/{filename}"
     db.commit()
     db.refresh(ropa)
-    return {"message": "Modelo 3D para Realidad Aumentada subido exitosamente", "modelo_3d_uri": ropa.modelo_3d_uri}
+    return {"message": "Modelo 3D para Realidad Aumentada subido exitosamente", "modelo_3d_uri": _normalizar_media_url(ropa.modelo_3d_uri)}
 
 
 @router.post("/{ropa_id}/variantes", response_model=VariantePrendaResponse, status_code=status.HTTP_201_CREATED)
@@ -497,6 +534,7 @@ router_catalogo_compat = APIRouter(
 @router_catalogo_compat.get("/")
 @router_catalogo_compat.get("")
 def listar_catalogo_compat(
+    request: Request,
     categoria: Optional[int] = None,
     categoria_id: Optional[int] = None,
     sucursal_id: Optional[int] = None,
@@ -515,6 +553,27 @@ def listar_catalogo_compat(
         joinedload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion),
         joinedload(Ropa.resenas)
     )
+
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    tenant_id = 1
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        tiene_prendas = db.query(Ropa.id).filter(Ropa.empresa_id == tenant_id).first() is not None
+        if tiene_prendas:
+            query = query.filter(Ropa.empresa_id == tenant_id)
+        else:
+            query = query.filter(or_(Ropa.empresa_id == tenant_id, Ropa.empresa_id == 1, Ropa.empresa_id.is_(None)))
+
+    # Aislamiento estricto de sucursales por tenant (evitar mezclar stock de otras empresas)
+    sucursales_tenant = db.query(Sucursal.id).filter(Sucursal.empresa_id == tenant_id).all()
+    tenant_sucursal_ids = set(s[0] for s in sucursales_tenant)
+
     if cat_filtro:
         query = query.filter(Ropa.categoria_id == cat_filtro)
     if search:
@@ -523,7 +582,7 @@ def listar_catalogo_compat(
     total = query.count()
     if page is not None:
         ropas = query.order_by(Ropa.id.asc()).offset((page - 1) * page_size).limit(page_size).all()
-        res = [_formatear_producto_angular(r, db=db, sucursal_id=sucursal_id) for r in ropas]
+        res = [_formatear_producto_angular(r, db=db, sucursal_id=sucursal_id, tenant_sucursal_ids=tenant_sucursal_ids) for r in ropas]
         base = "/api/catalogo/"
         return {
             "count": total,
@@ -533,9 +592,18 @@ def listar_catalogo_compat(
         }
     else:
         ropas = query.order_by(Ropa.id.asc()).all()
-        return [_formatear_producto_angular(r, db=db, sucursal_id=sucursal_id) for r in ropas]
+        return [_formatear_producto_angular(r, db=db, sucursal_id=sucursal_id, tenant_sucursal_ids=tenant_sucursal_ids) for r in ropas]
 
 @router_catalogo_compat.get("/{ropa_id}")
+@router_catalogo_compat.get("/{ropa_id}/")
+def obtener_catalogo_compat(ropa_id: int, request: Request, sucursal_id: Optional[int] = None, db: Session = Depends(get_db)):
+    ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
+    if not ropa:
+        raise HTTPException(status_code=404, detail="Prenda no encontrada")
+    tenant_id = obtener_tenant_id(request, db)
+    sucursales_tenant = db.query(Sucursal.id).filter(Sucursal.empresa_id == tenant_id).all()
+    tenant_sucursal_ids = set(s[0] for s in sucursales_tenant)
+    return _formatear_producto_angular(ropa, db=db, sucursal_id=sucursal_id, tenant_sucursal_ids=tenant_sucursal_ids)
 @router_catalogo_compat.get("/{ropa_id}/")
 def obtener_catalogo_compat(ropa_id: int, db: Session = Depends(get_db)):
     ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
@@ -546,8 +614,8 @@ def obtener_catalogo_compat(ropa_id: int, db: Session = Depends(get_db)):
 
 @router_catalogo_compat.get("/ropas")
 @router_catalogo_compat.get("/ropas/")
-def listar_catalogo_ropas_compat(db: Session = Depends(get_db)):
-    return listar_catalogo_compat(page=None, db=db)
+def listar_catalogo_ropas_compat(request: Request, db: Session = Depends(get_db)):
+    return listar_catalogo_compat(request=request, page=None, db=db)
 
 
 router_catalogo_v1 = APIRouter(
@@ -560,6 +628,7 @@ router_catalogo_v1 = APIRouter(
 @router_catalogo_v1.get("/ropas")
 @router_catalogo_v1.get("/ropas/")
 def listar_catalogo_v1(
+    request: Request,
     categoria: Optional[int] = None,
     categoria_id: Optional[int] = None,
     sucursal_id: Optional[int] = None,
@@ -569,6 +638,7 @@ def listar_catalogo_v1(
     db: Session = Depends(get_db)
 ):
     return listar_catalogo_compat(
+        request=request,
         categoria=categoria,
         categoria_id=categoria_id,
         sucursal_id=sucursal_id,
@@ -595,6 +665,7 @@ router_productos_v1 = APIRouter(
 )
 
 def _listar_productos_impl(
+    request: Request,
     page: Optional[int] = None,
     page_size: int = 10,
     search: Optional[str] = None,
@@ -603,6 +674,7 @@ def _listar_productos_impl(
     db: Session = Depends(get_db)
 ):
     return listar_catalogo_compat(
+        request=request,
         categoria=categoria,
         categoria_id=categoria_id,
         search=search,
@@ -611,19 +683,23 @@ def _listar_productos_impl(
         db=db
     )
 
-def _obtener_producto_impl(ropa_id: int, db: Session = Depends(get_db)):
+def _obtener_producto_impl(ropa_id: int, request: Request = None, db: Session = Depends(get_db)):
     ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
     if not ropa:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
-    return _formatear_producto_angular(ropa, db=db)
+    tenant_id = obtener_tenant_id(request, db) if request else 1
+    sucursales_tenant = db.query(Sucursal.id).filter(Sucursal.empresa_id == tenant_id).all()
+    tenant_sucursal_ids = set(s[0] for s in sucursales_tenant)
+    return _formatear_producto_angular(ropa, db=db, tenant_sucursal_ids=tenant_sucursal_ids)
 
-def _crear_producto_impl(data: dict, db: Session = Depends(get_db)):
+def _crear_producto_impl(data: dict, request: Request, db: Session = Depends(get_db)):
     nombre = data.get("nombre")
     if not nombre:
         raise HTTPException(status_code=400, detail="El nombre del producto es obligatorio")
     
-    if db.query(exists().where(Ropa.nombre == nombre)).scalar():
-        raise HTTPException(status_code=400, detail="Ya existe una prenda registrada con este nombre")
+    tenant_id = obtener_tenant_id(request, db)
+    if db.query(exists().where(Ropa.nombre == nombre, Ropa.empresa_id == tenant_id)).scalar():
+        raise HTTPException(status_code=400, detail="Ya existe una prenda registrada con este nombre para su empresa")
     
     categoria_id = data.get("categoria_id") or data.get("categoria") or 1
     proveedor_id = data.get("marca_id") or data.get("proveedor_id") or 1
@@ -637,11 +713,43 @@ def _crear_producto_impl(data: dict, db: Session = Depends(get_db)):
         categoria_id=categoria_id,
         temporada_id=data.get("temporada_id") or 1,
         proveedor_id=proveedor_id,
-        activo=data.get("activo", True)
+        activo=data.get("activo", True),
+        empresa_id=tenant_id
     )
     db.add(nueva)
     db.commit()
     db.refresh(nueva)
+
+    # Crear variante base y existencias en sucursales de la empresa
+    talla_def = db.query(Talla).filter(Talla.medida == "M").first() or db.query(Talla).first()
+    color_def = db.query(Color).first()
+    sku_prefix = "".join([c for c in nueva.nombre if c.isalnum()][:4]).upper() or "ROP"
+    def_var = VariantePrenda(
+        ropa_id=nueva.id,
+        talla_id=talla_def.id if talla_def else 1,
+        color_id=color_def.id if color_def else 1,
+        sku=f"{sku_prefix}-{nueva.id}-M-STD",
+        cod_barra=f"BAR-{nueva.id}-{sku_prefix}",
+        activo=True
+    )
+    db.add(def_var)
+    db.commit()
+    db.refresh(def_var)
+
+    query_sucursales = db.query(Sucursal)
+    if tenant_id:
+        query_sucursales = query_sucursales.filter(Sucursal.empresa_id == tenant_id)
+    sucursales = query_sucursales.all()
+    for suc in sucursales:
+        db.add(InventarioSucursal(
+            sucursal_id=suc.id,
+            variante_id=def_var.id,
+            stock_fisico=0,
+            stock_reservado=0,
+            stock_minimo=5
+        ))
+    db.commit()
+
     return _formatear_producto_angular(nueva, db=db)
 
 for r_prod in [router_productos_compat, router_productos_v1]:
@@ -863,7 +971,7 @@ async def upload_multimedia_compat(
     db.refresh(ropa)
     return {
         "id": 1,
-        "archivo_url": url_guardada,
+        "archivo_url": _normalizar_media_url(url_guardada),
         "tipo": tipo,
         "es_principal": es_principal,
         "orden": orden,
@@ -890,6 +998,7 @@ router_variantes_compat = APIRouter(
 @router_variantes_compat.get("/")
 @router_variantes_compat.get("")
 def listar_variantes_compat(
+    request: Request,
     producto_id: Optional[int] = None,
     ropa_id: Optional[int] = None,
     sucursal_id: Optional[int] = None,
@@ -908,30 +1017,56 @@ def listar_variantes_compat(
     )
     if pid:
         query = query.filter(VariantePrenda.ropa_id == pid)
-    
+
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    tenant_id = 1
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        tiene_prendas = db.query(Ropa.id).filter(Ropa.empresa_id == tenant_id).first() is not None
+        if tiene_prendas:
+            query = query.join(VariantePrenda.ropa).filter(Ropa.empresa_id == tenant_id)
+        else:
+            query = query.join(VariantePrenda.ropa).filter(or_(Ropa.empresa_id == tenant_id, Ropa.empresa_id == 1, Ropa.empresa_id.is_(None)))
+
     total = query.count()
     items = query.order_by(VariantePrenda.id.asc()).all()
     hoy = date.today()
     results = []
+    
+    # Pre-cargar IDs de sucursales del tenant para aislamiento estricto
+    sucursales_tenant = db.query(Sucursal.id).filter(Sucursal.empresa_id == tenant_id).all()
+    tenant_sucursal_ids = set(s[0] for s in sucursales_tenant)
+
+    # Si no se especifico sucursal_id explicita, usar la sucursal principal del tenant
+    # para garantizar discriminacion estricta por tienda fisica individual (regla Ing. Garzon)
+    if not sucursal_id and tenant_sucursal_ids:
+        sucursal_id = sorted(list(tenant_sucursal_ids))[0]
+
     for v in items:
         ropa = v.ropa
         precio_ropa = float(ropa.precio) if (ropa and ropa.precio is not None) else 0.0
         talla_nom = getattr(v.talla, 'medida', None) or (v.talla.nombre if v.talla else "M")
         color_nom = v.color.nombre if v.color else "Normal"
         color_hx = v.color.codigo_hex if v.color else "#000000"
-        
-        # Stock real físico
+
+        # Stock fisico real discriminado por sucursal de la empresa
         if sucursal_id:
             inv_suc = next((inv for inv in (v.inventarios_sucursal or []) if inv.sucursal_id == sucursal_id), None)
             if not inv_suc:
                 inv_suc = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id, InventarioSucursal.sucursal_id == sucursal_id).first()
-            stock_total = (inv_suc.stock_disponible or inv_suc.stock_fisico or 0) if inv_suc else 0
+            stock_total = (inv_suc.stock_disponible if inv_suc and inv_suc.stock_disponible is not None else (inv_suc.stock_fisico or 0)) if inv_suc else 0
         else:
-            stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in (v.inventarios_sucursal or []))
-            if stock_total == 0 and not v.inventarios_sucursal:
-                invs = db.query(InventarioSucursal).filter(InventarioSucursal.variante_id == v.id).all()
-                stock_total = sum(inv.stock_disponible or inv.stock_fisico or 0 for inv in invs)
-        
+            if tenant_sucursal_ids:
+                stock_total = sum((inv.stock_disponible if inv.stock_disponible is not None else (inv.stock_fisico or 0)) for inv in (v.inventarios_sucursal or []) if inv.sucursal_id in tenant_sucursal_ids)
+            else:
+                stock_total = sum((inv.stock_disponible if inv.stock_disponible is not None else (inv.stock_fisico or 0)) for inv in (v.inventarios_sucursal or []))
+
         # Descuento promocional activo
         mejor_descuento = 0.0
         if ropa and ropa.promociones_asociadas:

@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FashionStore SaaS — Centro de Control Multi-Tenant (2do Parcial SI2)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0B0F17;
+      --card-bg: rgba(18, 24, 38, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --primary: #3B82F6;
+      --primary-glow: rgba(59, 130, 246, 0.25);
+      --emerald: #10B981;
+      --rose: #F43F5E;
+      --amber: #F59E0B;
+      --text: #F3F4F6;
+      --text-muted: #9CA3AF;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.08) 0px, transparent 50%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+    h1, h2, h3, h4 { font-family: 'Outfit', sans-serif; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    
+    /* Header */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-icon {
+      width: 48px; height: 48px; border-radius: 12px;
+      background: linear-gradient(135deg, #3B82F6, #1D4ED8);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px; font-weight: 800; color: white;
+      box-shadow: 0 0 20px var(--primary-glow);
+    }
+    .brand-title { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+    .brand-sub { font-size: 13px; color: var(--text-muted); }
+    .docente-badge {
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      padding: 8px 14px; border-radius: 999px;
+      font-size: 13px; font-weight: 600; color: #93C5FD;
+    }
+
+    /* Tenant Selector Bar */
+    .tenant-bar {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 16px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .tenant-select-group { display: flex; align-items: center; gap: 12px; }
+    .select-label { font-size: 14px; color: var(--text-muted); font-weight: 500; }
+    .tenant-btn {
+      padding: 10px 18px;
+      border-radius: 10px;
+      border: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .tenant-btn:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.2); }
+    .tenant-btn.active-pro {
+      background: rgba(59, 130, 246, 0.2);
+      border-color: #3B82F6;
+      color: #93C5FD;
+      box-shadow: 0 0 16px rgba(59, 130, 246, 0.3);
+    }
+    .tenant-btn.active-basico {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: #10B981;
+      color: #A7F3D0;
+      box-shadow: 0 0 16px rgba(16, 185, 129, 0.3);
+    }
+    .api-status {
+      display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--emerald); font-weight: 600;
+    }
+    .pulse-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.9); } }
+
+    /* Grid Layout */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 28px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 24px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+    .card-title { font-size: 18px; font-weight: 700; color: white; display: flex; align-items: center; gap: 8px; }
+    .card-desc { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+
+    /* Badges */
+    .badge {
+      padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase;
+    }
+    .badge-pro { background: rgba(59, 130, 246, 0.2); color: #93C5FD; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-basico { background: rgba(16, 185, 129, 0.2); color: #A7F3D0; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-danger { background: rgba(244, 63, 94, 0.2); color: #FDA4AF; border: 1px solid rgba(244, 63, 94, 0.3); }
+    .badge-success { background: rgba(16, 185, 129, 0.2); color: #A7F3D0; border: 1px solid rgba(16, 185, 129, 0.3); }
+
+    /* Tenant Info Panel */
+    .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+    .stat-box {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--card-border);
+      border-radius: 12px; padding: 14px;
+    }
+    .stat-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+    .stat-val { font-size: 18px; font-weight: 700; color: white; margin-top: 4px; }
+
+    /* Action Buttons */
+    .btn-action {
+      background: linear-gradient(135deg, #3B82F6, #2563EB);
+      color: white; border: none; padding: 12px 18px; border-radius: 10px;
+      font-weight: 600; cursor: pointer; transition: all 0.2s; font-size: 14px;
+      display: inline-flex; align-items: center; gap: 8px; width: 100%; justify-content: center;
+    }
+    .btn-action:hover { box-shadow: 0 0 20px var(--primary-glow); transform: translateY(-1px); }
+    .btn-upgrade {
+      background: linear-gradient(135deg, #8B5CF6, #6D28D9);
+      color: white; border: none; padding: 12px 18px; border-radius: 10px;
+      font-weight: 600; cursor: pointer; transition: all 0.2s; font-size: 14px;
+      display: inline-flex; align-items: center; gap: 8px; width: 100%; justify-content: center;
+      margin-top: 10px;
+    }
+    .btn-upgrade:hover { box-shadow: 0 0 20px rgba(139, 92, 246, 0.4); transform: translateY(-1px); }
+
+    /* Output Console */
+    .console-box {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 14px;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 12.5px;
+      min-height: 120px;
+      max-height: 220px;
+      overflow-y: auto;
+      margin-top: 14px;
+      color: #E2E8F0;
+      white-space: pre-wrap;
+    }
+    .sucursales-list {
+      list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 14px 0;
+    }
+    .sucursales-list li {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--card-border);
+      border-radius: 8px; padding: 10px 14px;
+      display: flex; justify-content: space-between; align-items: center; font-size: 13.5px;
+    }
+
+    /* Links Footer */
+    .links-footer {
+      display: flex; justify-content: center; gap: 20px; margin-top: 32px;
+    }
+    .link-btn {
+      color: var(--text-muted); text-decoration: none; font-size: 13px; font-weight: 600;
+      display: flex; align-items: center; gap: 6px; transition: color 0.2s;
+    }
+    .link-btn:hover { color: #3B82F6; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="brand-icon">FS</div>
+        <div>
+          <h1 class="brand-title">FashionStore SaaS</h1>
+          <p class="brand-sub">Consola de Control Multi-Tenant • Sistemas 2 (INF-412 SA)</p>
+        </div>
+      </div>
+      <div class="docente-badge">
+        Docente: MSc. Ing. Angélica Garzón Cuéllar | Estudiante: Yeison Choque León
+      </div>
+    </header>
+
+    <!-- Tenant Switcher Bar -->
+    <div class="tenant-bar">
+      <div class="tenant-select-group">
+        <span class="select-label">🏢 Seleccionar Tenant Activo:</span>
+        <button id="btn-t1" class="tenant-btn active-pro" onclick="seleccionarTenant(1)">
+          <span>🔵 Tenant 1: FashionStore S.A.</span>
+          <span class="badge badge-pro">Plan Pro</span>
+        </button>
+        <button id="btn-t2" class="tenant-btn" onclick="seleccionarTenant(2)">
+          <span>🟢 Tenant 2: Urban Boutique</span>
+          <span class="badge badge-basico">Plan Básico</span>
+        </button>
+      </div>
+      <div class="api-status">
+        <div class="pulse-dot"></div>
+        <span>FastAPI + PostgreSQL en Línea (:8000)</span>
+      </div>
+    </div>
+
+    <!-- Active Tenant Overview Card -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title" id="tenant-nombre">Cargando Empresa...</h2>
+          <p class="card-desc" id="tenant-desc">Verificando aislamiento de datos en PostgreSQL...</p>
+        </div>
+        <div id="tenant-plan-badge">
+          <span class="badge badge-pro">PROFESIONAL</span>
+        </div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-box">
+          <div class="stat-label">Plan y Costo Mensual</div>
+          <div class="stat-val" id="stat-plan">Plan Profesional</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Capacidad de Sucursales</div>
+          <div class="stat-val" id="stat-sucursales">3 / 10 Tiendas</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Inteligencia Artificial</div>
+          <div class="stat-val" id="stat-ia" style="color: var(--emerald);">HABILITADO</div>
+        </div>
+      </div>
+      <div id="upgrade-panel" style="display: none;">
+        <button class="btn-upgrade" onclick="cambiarPlanTenant(2)">
+          ⚡ Subir a Plan Profesional (Habilitar IA y ampliar a 10 sucursales)
+        </button>
+      </div>
+    </div>
+
+    <!-- Live Testing Grid -->
+    <div class="grid">
+      <!-- Card 1: Prueba de IA -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h3 class="card-title">🤖 Prueba de Inteligencia Artificial (CU-17 / CU-15)</h3>
+            <p class="card-desc">Regla RNF: Plan Básico = 403 Forbidden | Plan Pro = 200 OK</p>
+          </div>
+        </div>
+        <button class="btn-action" onclick="probarAccesoIA()">
+          <span>Ejecutar Consulta IA con Header X-Tenant-ID</span>
+        </button>
+        <div class="console-box" id="console-ia">// Presione el botón superior para consultar la API de IA...</div>
+      </div>
+
+      <!-- Card 2: Prueba de Límite de Sucursales -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h3 class="card-title">🏬 Sucursales y Límite del Plan (CU-03)</h3>
+            <p class="card-desc">Regla RNF: Plan Básico máximo 2 sucursales (Intento de 3ra = 400 Bad Request)</p>
+          </div>
+        </div>
+        <ul class="sucursales-list" id="lista-sucursales">
+          <li>Cargando sucursales aisladas...</li>
+        </ul>
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+          <input id="input-sucursal" type="text" placeholder="Nombre nueva sucursal..." style="flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.3); color: white;">
+          <button class="btn-action" style="width: auto;" onclick="crearSucursal()">+ Registrar</button>
+        </div>
+        <div class="console-box" id="console-sucursal" style="min-height: 60px; max-height: 90px;">// Respuestas de validación de límite...</div>
+      </div>
+    </div>
+
+    <!-- Footer Links -->
+    <div class="links-footer">
+      <a href="/docs" target="_blank" class="link-btn">📖 Documentación Swagger (/docs)</a>
+      <a href="/api/planes" target="_blank" class="link-btn">📋 Catálogo de Planes (/api/planes)</a>
+      <a href="/api/v1/sucursales/" target="_blank" class="link-btn">🏬 API Sucursales</a>
+    </div>
+  </div>
+
+  <script>
+    let tenantActualId = 1;
+    let infoEmpresa = null;
+
+    async function cargarDatosTenant() {
+      try {
+        const resp = await fetch(`/api/v1/suscripciones/mi-suscripcion?empresa_id=${tenantActualId}`);
+        const susc = await resp.json();
+
+        const respEmp = await fetch(`/api/v1/empresas/`);
+        const empresas = await respEmp.json();
+        infoEmpresa = empresas.find(e => e.id === tenantActualId) || empresas[0];
+
+        // Actualizar UI
+        document.getElementById('tenant-nombre').innerText = infoEmpresa.razon_social + ` (ID: ${infoEmpresa.id})`;
+        document.getElementById('tenant-desc').innerText = `NIT: ${infoEmpresa.nit || '1029384021'} • Slug: ${infoEmpresa.slug} • Estado: ${infoEmpresa.estado}`;
+
+        const isPro = susc.soporta_ia;
+        document.getElementById('stat-plan').innerText = `${susc.plan_nombre} (Bs. ${susc.plan_precio}/m)`;
+        
+        // Cargar sucursales
+        const respSucs = await fetch('/api/v1/sucursales/', {
+          headers: { 'X-Tenant-ID': tenantActualId.toString() }
+        });
+        const sucs = await respSucs.json();
+        document.getElementById('stat-sucursales').innerText = `${sucs.length} / ${susc.limite_sucursales} Tiendas`;
+        
+        const iaBadge = document.getElementById('stat-ia');
+        const planBadge = document.getElementById('tenant-plan-badge');
+        const upgradePanel = document.getElementById('upgrade-panel');
+
+        if (isPro) {
+          iaBadge.innerText = 'HABILITADO';
+          iaBadge.style.color = '#10B981';
+          planBadge.innerHTML = '<span class="badge badge-pro">PLAN PROFESIONAL</span>';
+          upgradePanel.style.display = 'none';
+        } else {
+          iaBadge.innerText = 'BLOQUEADO';
+          iaBadge.style.color = '#F43F5E';
+          planBadge.innerHTML = '<span class="badge badge-basico">PLAN BÁSICO</span>';
+          upgradePanel.style.display = 'block';
+        }
+
+        // Renderizar lista sucursales
+        const listaEl = document.getElementById('lista-sucursales');
+        listaEl.innerHTML = '';
+        if (sucs.length === 0) {
+          listaEl.innerHTML = '<li>No hay sucursales registradas para este tenant.</li>';
+        } else {
+          sucs.forEach(s => {
+            listaEl.innerHTML += `<li><span>📍 <strong>${s.nombre}</strong> (${s.ciudad})</span> <span style="font-size: 11px; color: var(--text-muted);">${s.direccion || ''}</span></li>`;
+          });
+        }
+      } catch (err) {
+        console.error('Error cargando tenant:', err);
+      }
+    }
+
+    function seleccionarTenant(id) {
+      tenantActualId = id;
+      document.getElementById('btn-t1').className = 'tenant-btn' + (id === 1 ? ' active-pro' : '');
+      document.getElementById('btn-t2').className = 'tenant-btn' + (id === 2 ? ' active-basico' : '');
+      document.getElementById('console-ia').innerText = `// Cambiado a Tenant ${id}. Presione consultar para probar...`;
+      document.getElementById('console-sucursal').innerText = '// Listo para operaciones.';
+      cargarDatosTenant();
+    }
+
+    async function probarAccesoIA() {
+      const consoleEl = document.getElementById('console-ia');
+      consoleEl.innerText = `[ENVIANDO PETICIÓN HTTP GET /api/v1/ia/alertas]\nHeader: X-Tenant-ID: ${tenantActualId} ...\n`;
+
+      try {
+        const resp = await fetch('/api/v1/ia/alertas', {
+          headers: { 'X-Tenant-ID': tenantActualId.toString() }
+        });
+
+        const status = resp.status;
+        const data = await resp.json();
+
+        if (status === 200) {
+          consoleEl.innerText += `\n[RESPUESTA 200 OK - ACCESO PERMITIDO]\nEl Tenant cuenta con Plan Profesional con IA activa.\nResultados devueltos:\n${JSON.stringify(data, null, 2)}`;
+        } else if (status === 403) {
+          consoleEl.innerText += `\n[RESPUESTA 403 FORBIDDEN - REGLA DE NEGOCIO ACTIVADA]\n${data.detail}\n\n-> La Inteligencia Artificial está bloqueada porque este Tenant tiene Plan Básico.\n-> Haga clic en 'Subir a Plan Profesional' arriba para desbloquearla en vivo.`;
+        } else {
+          consoleEl.innerText += `\n[STATUS ${status}]\n${JSON.stringify(data, null, 2)}`;
+        }
+      } catch (err) {
+        consoleEl.innerText += `\n[ERROR DE RED]\n${err.message}`;
+      }
+    }
+
+    async function crearSucursal() {
+      const input = document.getElementById('input-sucursal');
+      const nombre = input.value.trim() || `Sucursal ${Date.now() % 1000}`;
+      const consoleEl = document.getElementById('console-sucursal');
+
+      consoleEl.innerText = `[POST /api/v1/sucursales/] Tenant: ${tenantActualId}, Nombre: "${nombre}"...\n`;
+
+      try {
+        const resp = await fetch('/api/v1/sucursales/', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Tenant-ID': tenantActualId.toString()
+          },
+          body: JSON.stringify({
+            nombre: nombre,
+            ciudad: 'Santa Cruz',
+            direccion: 'Av. Comercial #100',
+            telefono: '70011223'
+          })
+        });
+
+        const data = await resp.json();
+        if (resp.status === 201) {
+          consoleEl.innerText += `[201 CREATED] ¡Sucursal "${data.nombre}" creada con éxito!\n`;
+          input.value = '';
+          cargarDatosTenant();
+        } else {
+          consoleEl.innerText += `[ERROR ${resp.status}] ${data.detail}\n`;
+        }
+      } catch (err) {
+        consoleEl.innerText += `[ERROR DE RED] ${err.message}\n`;
+      }
+    }
+
+    async function cambiarPlanTenant(planId) {
+      if (!confirm('¿Desea cambiar el plan de esta empresa ahora?')) return;
+      try {
+        const resp = await fetch(`/api/v1/suscripciones/cambiar-plan?empresa_id=${tenantActualId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            plan_id: planId,
+            ciclo: 'mensual',
+            motivo: 'Demostración de Upgrade en Vivo'
+          })
+        });
+        const res = await resp.json();
+        alert(`¡Plan actualizado con éxito a: ${res.plan_nombre}!`);
+        cargarDatosTenant();
+      } catch (err) {
+        alert('Error cambiando plan: ' + err.message);
+      }
+    }
+
+    // Inicializar
+    cargarDatosTenant();
+  </script>
+</body>
+</html>

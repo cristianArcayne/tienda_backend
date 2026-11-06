@@ -137,47 +137,27 @@ def _resolver_o_crear_cliente(db: Session, cliente_input: Optional[str], razon_s
     if cliente:
         return cliente
 
-    # 2. Buscar en Usuario por nombre_usuario o id
+    # 2. Si identificador coincide con un Usuario (ej: cajero_dismac_central)
     u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(identificador)).first()
     if not u and identificador.isdigit():
         u = db.query(Usuario).filter(Usuario.id == int(identificador)).first()
 
-    if u and u.persona_ci:
-        cliente = db.query(Cliente).filter(Cliente.ci == u.persona_ci).first()
-        if cliente:
-            return cliente
-        persona = db.query(Persona).filter(Persona.ci == u.persona_ci).first()
-        if persona:
-            cliente = Cliente(
-                ci=persona.ci,
-                nombre=persona.nombre,
-                apellido_pat=persona.apellido_pat,
-                apellido_mat=persona.apellido_mat,
-                correo=persona.correo,
-                telefono=persona.telefono,
-                tipo_persona="CLIENTE"
-            )
-            db.add(cliente)
-            db.flush()
-            return cliente
+    ci_evaluar = u.persona_ci if (u and u.persona_ci) else identificador
 
-    # 3. Buscar en Persona por CI
-    persona = db.query(Persona).filter(Persona.ci == identificador).first()
+    # Verificar si la persona ya existe en la tabla personas
+    persona = db.query(Persona).filter(Persona.ci == ci_evaluar).first()
     if persona:
-        cliente = Cliente(
-            ci=persona.ci,
-            nombre=persona.nombre,
-            apellido_pat=persona.apellido_pat,
-            apellido_mat=persona.apellido_mat,
-            correo=persona.correo,
-            telefono=persona.telefono,
-            tipo_persona="CLIENTE"
-        )
-        db.add(cliente)
-        db.flush()
-        return cliente
+        if persona.tipo_persona == "CLIENTE":
+            cli = db.query(Cliente).filter(Cliente.ci == persona.ci).first()
+            if cli:
+                return cli
+        else:
+            # Es un Empleado u otro rol; para no romper la herencia polimórfica en ventas:
+            default_cli = db.query(Cliente).first()
+            if default_cli:
+                return default_cli
 
-    # 4. Crear cliente específico para este identificador único
+    # 3. Crear cliente nuevo para este identificador único
     nom_disp = razon_social if (razon_social and razon_social not in ["Sin Nombre", "Consumidor Final", "0"]) else identificador.capitalize()
     partes = nom_disp.split(" ", 1)
     cliente = Cliente(
@@ -204,12 +184,33 @@ def _ejecutar_venta_pos_core(
     monto_recibido: Optional[float] = None,
     descuento_total: Optional[float] = 0.0,
     tipo_venta_id: Optional[int] = None,
-    token_pasarela: Optional[str] = None
+    token_pasarela: Optional[str] = None,
+    codigo_transaccion_custom: Optional[str] = None
 ) -> Venta:
+    # 0. Idempotencia para resiliencia offline y reintentos de cola pending_sync
+    if codigo_transaccion_custom:
+        venta_existente = db.query(Venta).options(
+            joinedload(Venta.sucursal),
+            joinedload(Venta.empleado),
+            joinedload(Venta.cliente),
+            joinedload(Venta.metodo_pago),
+            joinedload(Venta.tipo_venta),
+            joinedload(Venta.factura),
+            joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa),
+            joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.talla),
+            joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
+        ).filter(Venta.codigo_transaccion == codigo_transaccion_custom).first()
+        if venta_existente:
+            return venta_existente
+
     # 1. Validar sucursal
     sucursal = db.query(Sucursal).filter(Sucursal.id == sucursal_id).first()
     if not sucursal:
-        raise HTTPException(status_code=404, detail="Sucursal no encontrada.")
+        sucursal = db.query(Sucursal).first()
+        if sucursal:
+            sucursal_id = sucursal.id
+        else:
+            raise HTTPException(status_code=404, detail="Sucursal no encontrada.")
 
     # 2. Validar o asignar empleado cajero
     empleado = None
@@ -306,7 +307,7 @@ def _ejecutar_venta_pos_core(
     # 7. Registrar Venta
     ahora = datetime.now()
     prefijo_trx = "TRX-ECOM" if es_digital else "TRX-POS"
-    codigo_trx = token_pasarela or f"{prefijo_trx}-{ahora.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    codigo_trx = codigo_transaccion_custom or token_pasarela or f"{prefijo_trx}-{ahora.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     nueva_venta = Venta(
         fecha=ahora,
         total=total_bruto,
@@ -411,9 +412,102 @@ def procesar_venta_pos(venta_in: VentaPOSCreate, db: Session = Depends(get_db)):
         nit_cliente=venta_in.nit_cliente,
         razon_social=venta_in.razon_social,
         monto_recibido=venta_in.monto_recibido,
-        descuento_total=venta_in.descuento_total
+        descuento_total=venta_in.descuento_total,
+        codigo_transaccion_custom=venta_in.codigo_transaccion or venta_in.offline_uuid
     )
     return _formatear_venta(venta)
+
+
+# ==============================================================================
+# CU09 & CU14: SINCRONIZACIÓN OFFLINE DE VENTAS POS (OUTBOX QUEUE PENDING_SYNC)
+# ==============================================================================
+
+@router.post(
+    "/sincronizar-lote",
+    summary="[CU-09/CU-14] Sincronizar lote de transacciones offline (Outbox queue pending_sync)"
+)
+@router.post("/sincronizar-lote/", include_in_schema=False)
+@compat_router.post("/sincronizar-lote")
+@compat_router.post("/sincronizar-lote/", include_in_schema=False)
+def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)):
+    ventas_raw = payload.get("ventas", [])
+    resultados = []
+    for item in ventas_raw:
+        u_id = item.get("offline_uuid") or item.get("codigo_transaccion") or f"OFFLINE-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            raw_items = item.get("items") or item.get("detalles") or []
+            items_create = [
+                ItemVentaCreate(
+                    variante_id=int(d.get("variante_producto_id") or d.get("variante_id") or d.get("variante")),
+                    cantidad=int(d.get("cantidad", 1)),
+                    precio_unitario=float(d.get("precio_unitario", 0.0)) if d.get("precio_unitario") else None
+                )
+                for d in raw_items
+            ]
+
+            metodo_id = int(item.get("metodo_pago_id") or 1)
+            if item.get("metodo"):
+                m_str = str(item.get("metodo")).lower()
+                if "tarjeta" in m_str:
+                    metodo_id = 2
+                elif "qr" in m_str:
+                    metodo_id = 3
+                else:
+                    metodo_id = 1
+
+            # Resolver sucursal id considerando empresa_id del tenant
+            empresa_tenant_id = item.get("empresa_id")
+            sucursal_req_id = item.get("sucursal_id")
+            suc_final_id = None
+            if sucursal_req_id:
+                s_check = db.query(Sucursal).filter(Sucursal.id == int(sucursal_req_id)).first()
+                if s_check:
+                    suc_final_id = s_check.id
+            if not suc_final_id and empresa_tenant_id:
+                s_tenant = db.query(Sucursal).filter(Sucursal.empresa_id == int(empresa_tenant_id)).first()
+                if s_tenant:
+                    suc_final_id = s_tenant.id
+            if not suc_final_id:
+                s_first = db.query(Sucursal).first()
+                suc_final_id = s_first.id if s_first else 1
+
+            v = _ejecutar_venta_pos_core(
+                db=db,
+                sucursal_id=suc_final_id,
+                metodo_pago_id=metodo_id,
+                items=items_create,
+                empleado_ci=str(item.get("empleado_id") or item.get("usuario_id") or "1001"),
+                cliente_ci=str(item.get("cliente_ci") or item.get("cliente_nombre") or "") or None,
+                nit_cliente=str(item.get("nit_cliente") or "0"),
+                razon_social=str(item.get("razon_social") or item.get("cliente_nombre") or "Sin Nombre"),
+                monto_recibido=float(item.get("monto_recibido")) if item.get("monto_recibido") is not None else None,
+                descuento_total=float(item.get("descuento_total") or 0.0),
+                tipo_venta_id=1,
+                codigo_transaccion_custom=u_id
+            )
+            db.commit()
+            resp = _formatear_venta(v)
+            resultados.append({
+                "offline_uuid": u_id,
+                "status": "SINCRONIZADA",
+                "venta_id": resp.id,
+                "nro_factura": resp.factura.nro_factura if resp.factura else "",
+                "total": resp.total
+            })
+        except Exception as e:
+            db.rollback()
+            resultados.append({
+                "offline_uuid": u_id,
+                "status": "ERROR",
+                "detalle": str(e)
+            })
+
+    return {
+        "total_recibidas": len(ventas_raw),
+        "total_exitosas": sum(1 for r in resultados if r["status"] == "SINCRONIZADA"),
+        "resultados": resultados
+    }
+
 
 
 # ==============================================================================
@@ -680,6 +774,12 @@ class VentaFrontendCreateDto(BaseModel):
     razon_social: Optional[str] = "Sin Nombre"
     monto_recibido: Optional[float] = None
     detalles: List[dict] = []
+    offline_uuid: Optional[str] = None
+    codigo_transaccion: Optional[str] = None
+
+
+class LoteSincronizacionOfflineDto(BaseModel):
+    ventas: List[VentaFrontendCreateDto]
 
 
 @compat_router.post("/")
@@ -736,7 +836,8 @@ def crear_venta_compat_frontend(body: VentaFrontendCreateDto, db: Session = Depe
         razon_social=razon_soc,
         monto_recibido=body.monto_recibido,
         descuento_total=body.descuento_total or 0.0,
-        tipo_venta_id=tipo_id
+        tipo_venta_id=tipo_id,
+        codigo_transaccion_custom=body.codigo_transaccion or body.offline_uuid
     )
 
     resp = _formatear_venta(venta)
@@ -753,6 +854,7 @@ def crear_venta_compat_frontend(body: VentaFrontendCreateDto, db: Session = Depe
         "razon_social": resp.factura.razon_social if resp.factura else "Sin Nombre",
         "cambio_devuelto": resp.cambio_devuelto
     }
+
 
 
 class CheckoutFrontendDto(BaseModel):

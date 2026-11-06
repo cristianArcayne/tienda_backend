@@ -4,7 +4,7 @@ Alineado fielmente con ROPA, VARIANTE_PRENDA, INVENTARIO_SUCURSAL y SUCURSAL del
 """
 from datetime import date
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import or_
 
@@ -17,7 +17,7 @@ from schemas.catalogo_disponibilidad import (
     PrendaCatalogoDisponibilidadResponse,
     SucursalStockDetalleResponse,
 )
-from routers.catalogo import _normalizar_media_url
+from routers.catalogo import _normalizar_media_url, obtener_tenant_id
 
 router = APIRouter(
     prefix="/api/v1/catalogo-disponibilidad",
@@ -45,6 +45,7 @@ def _calcular_estado_stock(disponible: int) -> str:
     description="Consulta optimizada con Eager Loading desglosando existencias exactas (Stock_Fisico, Stock_Reservado, Stock_Disponible) por tienda."
 )
 def consultar_catalogo_con_disponibilidad(
+    request: Request,
     id_categoria: Optional[int] = Query(None, description="Filtrar por ID de categoría"),
     talla: Optional[str] = Query(None, description="Filtrar por medida de talla (ej. S, M, L, XL, 38, 40)"),
     color: Optional[str] = Query(None, description="Filtrar por nombre de color (ej. Azul Denim, Negro Clásico)"),
@@ -74,6 +75,22 @@ def consultar_catalogo_con_disponibilidad(
         selectinload(Ropa.promociones_asociadas).joinedload(PromocionRopa.promocion)
     )
 
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        tiene_prendas = db.query(Ropa.id).filter(Ropa.empresa_id == tenant_id).first() is not None
+        if tiene_prendas:
+            query = query.filter(Ropa.empresa_id == tenant_id)
+        todas_sucursales = db.query(Sucursal).filter(Sucursal.empresa_id == tenant_id).all()
+    else:
+        todas_sucursales = db.query(Sucursal).all()
+
     if prenda_id:
         query = query.filter(Ropa.id == prenda_id)
 
@@ -90,7 +107,6 @@ def consultar_catalogo_con_disponibilidad(
         )
 
     ropas = query.order_by(Ropa.id.asc()).all()
-    todas_sucursales = db.query(Sucursal).all()
     resultado = []
 
     for r in ropas:
@@ -257,7 +273,10 @@ def obtener_disponibilidad_prenda(prenda_id: int, db: Session = Depends(get_db))
             detail=f"Prenda con ID {prenda_id} no encontrada."
         )
 
-    todas_sucursales = db.query(Sucursal).all()
+    if getattr(prenda, 'empresa_id', None):
+        todas_sucursales = db.query(Sucursal).filter(Sucursal.empresa_id == prenda.empresa_id).all()
+    else:
+        todas_sucursales = db.query(Sucursal).all()
     lista_sucursales_resp = []
 
     for suc in todas_sucursales:

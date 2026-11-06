@@ -58,6 +58,8 @@ class EmpresaResponse(EmpresaBase):
     creada_en: datetime
     plan_nombre: Optional[str] = None
     suscripcion_actual: Optional[dict] = None
+    limite_sucursales: Optional[int] = 2
+    sucursales_activas: Optional[int] = 0
 
     class Config:
         from_attributes = True
@@ -112,3 +114,27 @@ class HistorialCambioPlanResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# === REGISTRO PÚBLICO DE EMPRESA ===
+class SuperAdminRegistro(BaseModel):
+    username: str
+    email: str
+    password: str
+    password_confirm: Optional[str] = None
+
+
+class EmpresaRegistroRequest(BaseModel):
+    nombre: str
+    correo: str
+    plan: int
+    ciclo: Optional[str] = "mensual"
+    nit: Optional[str] = None
+    metodo_pago: Optional[str] = "tarjeta"
+    tarjeta_numero: Optional[str] = None
+    tarjeta_exp: Optional[str] = None
+    tarjeta_cvc: Optional[str] = None
+    titular: Optional[str] = None
+    super_admin: SuperAdminRegistro
+
+

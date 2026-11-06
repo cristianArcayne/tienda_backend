@@ -17,6 +17,12 @@ def hash_password(password: str) -> str:
 
 def usuario_to_dict(u: Usuario) -> dict:
     persona = u.persona
+    sucursal_id = None
+    try:
+        if persona and hasattr(persona, 'sucursal_id'):
+            sucursal_id = persona.sucursal_id
+    except Exception:
+        sucursal_id = None
     return {
         "id": u.id,
         "username": u.nombre_usuario,
@@ -24,10 +30,14 @@ def usuario_to_dict(u: Usuario) -> dict:
         "nombre": persona.nombre if persona else "",
         "apellido": persona.apellido_pat if persona else "",
         "telefono": persona.telefono if persona else "",
-        "is_superuser": u.rol.nombre.lower() in ["administrador", "admin"] if u.rol else False,
+        "ci": persona.ci if persona else "",
+        "sucursal_id": sucursal_id,
+        "is_superuser": (u.nombre_usuario.lower() == "admin" or u.empresa_id is None) and (u.rol.nombre.lower() in ["administrador", "admin"]) if u.rol else False,
         "activo": u.estado,
         "grupos": [u.rol.nombre] if u.rol else [],
         "rol_id": u.rol_id,
+        "empresa_id": u.empresa_id,
+        "empresa_nombre": u.empresa.razon_social if u.empresa else None,
     }
 
 def rol_to_dict(r: Rol) -> dict:
@@ -47,14 +57,33 @@ def paginar(query, page: int, page_size: int):
     items = query.offset((page - 1) * page_size).limit(page_size).all()
     return total, items
 
+from core_tenant import obtener_tenant_id
+
 # === USUARIOS ===
 
 @router.get("/api/usuarios")
 @router.get("/api/usuarios/")
 @router.get("/api/v1/usuarios")
 @router.get("/api/v1/usuarios/")
-def listar_usuarios(page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=5000), db: Session = Depends(get_db)):
-    query = db.query(Usuario).order_by(Usuario.id)
+def listar_usuarios(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=5000),
+    db: Session = Depends(get_db)
+):
+    query = db.query(Usuario)
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        query = query.filter(Usuario.empresa_id == tenant_id)
+
+    query = query.order_by(Usuario.id)
     total, usuarios = paginar(query, page, page_size)
     base = "/api/v1/usuarios"
     return {
@@ -82,9 +111,12 @@ def crear_usuario(body: dict, request: Request, db: Session = Depends(get_db)):
     username = body.get("username", "").strip()
     password = body.get("password", "")
     email    = body.get("email", "").strip()
-    grupo_id = body.get("grupo_id")
-    nombre   = body.get("nombre", username).strip() or username
+    grupo_id = body.get("grupo_id") or body.get("rol_id")
+    nombre   = body.get("nombre", "").strip() or username
     apellido = body.get("apellido", "").strip()
+    ci_param = body.get("ci", "").strip()
+    telefono = body.get("telefono", "").strip()
+    sucursal_id = body.get("sucursal_id")
 
     if not username:
         raise HTTPException(status_code=400, detail="El username es requerido")
@@ -103,7 +135,9 @@ def crear_usuario(body: dict, request: Request, db: Session = Depends(get_db)):
     if db.query(Persona).filter(Persona.correo == correo_final).first():
         correo_final = f"{username}_{uuid.uuid4().hex[:6]}@sin-correo.com"
 
-    fake_ci = str(uuid.uuid4().int)[:8]
+    fake_ci = ci_param if ci_param else str(uuid.uuid4().int)[:8]
+    if db.query(Persona).filter(Persona.ci == fake_ci).first():
+        fake_ci = str(uuid.uuid4().int)[:8]
     
     # Determinar si es Empleado o Cliente según el rol
     if rol.nombre.lower() == 'cliente':
@@ -113,6 +147,7 @@ def crear_usuario(body: dict, request: Request, db: Session = Depends(get_db)):
             apellido_pat=apellido if apellido else username,
             apellido_mat="",
             correo=correo_final,
+            telefono=telefono if telefono else None,
             preferencia_talla="M"
         )
     else:
@@ -123,7 +158,8 @@ def crear_usuario(body: dict, request: Request, db: Session = Depends(get_db)):
             apellido_pat=apellido if apellido else username,
             apellido_mat="",
             correo=correo_final,
-            sucursal_id=body.get("sucursal_id"),
+            telefono=telefono if telefono else None,
+            sucursal_id=sucursal_id,
             cargo=rol.nombre
         )
         
@@ -131,17 +167,19 @@ def crear_usuario(body: dict, request: Request, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(nueva_persona)
 
+    tenant_id = body.get("empresa_id") or obtener_tenant_id(request, db)
     nuevo_usuario = Usuario(
         nombre_usuario=username,
         contrasena=hash_password(password),
         persona_ci=nueva_persona.ci,
-        rol_id=rol.id
+        rol_id=rol.id,
+        empresa_id=tenant_id
     )
     db.add(nuevo_usuario)
     db.commit()
     db.refresh(nuevo_usuario)
     
-    registrar_bitacora(db, "INSERT", "usuarios", str(nuevo_usuario.id), f"Usuario creado: {username}", request=request)
+    registrar_bitacora(db, "INSERT", "usuarios", str(nuevo_usuario.id), f"Usuario creado: {username} (Tenant {tenant_id})", request=request)
     
     return usuario_to_dict(nuevo_usuario)
 
@@ -174,6 +212,12 @@ def actualizar_usuario(usuario_id: int, body: dict, request: Request, db: Sessio
             usuario.persona.nombre = body["nombre"]
         if body.get("apellido"):
             usuario.persona.apellido_pat = body["apellido"]
+        if "telefono" in body:
+            usuario.persona.telefono = body.get("telefono")
+        if "ci" in body and body.get("ci"):
+            usuario.persona.ci = body.get("ci")
+        if isinstance(usuario.persona, Empleado) and "sucursal_id" in body:
+            usuario.persona.sucursal_id = body.get("sucursal_id")
     else:
         if body.get("email") or body.get("nombre"):
             fake_ci = str(uuid.uuid4().int)[:8]

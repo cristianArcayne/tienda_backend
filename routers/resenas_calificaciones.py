@@ -117,7 +117,13 @@ def _formatear_resena_response(r: Resena, cli_nom: Optional[str] = None) -> Rese
 @compat_router.post("/", response_model=ResenaItemResponse, status_code=status.HTTP_201_CREATED)
 def crear_resena(resena_in: ResenaCreateRequest, request: Request = None, db: Session = Depends(get_db)):
     rid = resena_in.ropa_id or resena_in.producto_id or 1
-    estrellas = resena_in.puntuacion_estrellas or resena_in.calificacion or 5
+    raw_estrellas = resena_in.puntuacion_estrellas if resena_in.puntuacion_estrellas is not None else resena_in.calificacion
+    estrellas = 5 if raw_estrellas is None else raw_estrellas
+    if estrellas < 1 or estrellas > 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"La calificación de la prenda debe estar comprendida estrictamente entre 1 y 5 estrellas. Recibido: {estrellas}"
+        )
 
     # 1. Validar existencia de ropa
     prenda = db.query(Ropa).filter(Ropa.id == rid).first()
@@ -277,10 +283,14 @@ def actualizar_resena(
     if not resena:
         raise HTTPException(status_code=404, detail="Reseña no encontrada.")
 
-    if req.puntuacion_estrellas is not None:
-        resena.puntuacion_estrellas = req.puntuacion_estrellas
-    elif req.calificacion is not None:
-        resena.puntuacion_estrellas = req.calificacion
+    nuevas_estrellas = req.puntuacion_estrellas if req.puntuacion_estrellas is not None else req.calificacion
+    if nuevas_estrellas is not None:
+        if nuevas_estrellas < 1 or nuevas_estrellas > 5:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"La calificación de la prenda debe estar comprendida estrictamente entre 1 y 5 estrellas. Recibido: {nuevas_estrellas}"
+            )
+        resena.puntuacion_estrellas = nuevas_estrellas
 
     if req.comentario is not None:
         resena.comentario = req.comentario

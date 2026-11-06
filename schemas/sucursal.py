@@ -12,6 +12,7 @@ class SucursalCreate(BaseModel):
     direccion: str = Field(..., min_length=3, max_length=200)
     ciudad: str = Field(default="Santa Cruz", max_length=50)
     telefono: Optional[str] = Field(None, max_length=30)
+    empresa_id: Optional[int] = None
 
 
 class SucursalResponse(BaseModel):
@@ -20,6 +21,9 @@ class SucursalResponse(BaseModel):
     direccion: str
     ciudad: str
     telefono: Optional[str] = None
+    activo: Optional[bool] = True
+    empresa_id: Optional[int] = None
+    empresa_nombre: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

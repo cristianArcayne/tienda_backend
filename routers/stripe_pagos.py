@@ -10,7 +10,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
-import stripe
+try:
+    import stripe
+except ImportError:
+    stripe = None
 
 from database import get_db
 from models.venta import Venta, DetalleVenta, Factura, MetodoPago, TipoVenta
@@ -179,19 +182,22 @@ def confirmar_pago_stripe(body: ConfirmarPagoStripeRequest, db: Session = Depend
 @router.post("/webhook")
 @router_compat.post("/webhook")
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
-    """
-    Webhook para recibir notificaciones asíncronas de Stripe (ej: payment_intent.succeeded).
-    """
+    import json
     payload = await request.body()
     try:
-        event = stripe.Event.construct_from(
-            stripe.util.json.loads(payload), stripe.api_key
-        )
+        data = json.loads(payload.decode('utf-8') if isinstance(payload, bytes) else str(payload))
+        if stripe is not None and hasattr(stripe, 'Event'):
+            event = stripe.Event.construct_from(data, stripe.api_key)
+            event_type = event.type
+            payment_intent = event.data.object
+        else:
+            event_type = data.get('type', 'unknown')
+            payment_intent = data.get('data', {}).get('object', {})
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {'status': 'error', 'message': str(e)}
 
-    if event.type == "payment_intent.succeeded":
-        payment_intent = event.data.object
-        print(f"[Stripe Webhook] Pago exitoso recibido: {payment_intent.id} por {payment_intent.amount} {payment_intent.currency}")
+    if event_type == "payment_intent.succeeded":
+        pi_id = getattr(payment_intent, 'id', None) or (payment_intent.get('id') if isinstance(payment_intent, dict) else '')
+        print(f"[Stripe Webhook] Pago exitoso recibido: {pi_id}")
 
-    return {"status": "received", "event_type": event.type}
+    return {'status': 'received', 'event_type': event_type}

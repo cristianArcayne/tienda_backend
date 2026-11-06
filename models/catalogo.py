@@ -51,6 +51,7 @@ class Proveedor(Base):
     direccion = Column(String(255), nullable=True)
     telefono = Column(String(30), nullable=True)
     contacto = Column(String(100), nullable=True)
+    empresa_id = Column(Integer, ForeignKey("empresas.id", ondelete="CASCADE"), nullable=True, default=1, index=True)
 
     # Relación 1 a N con ROPA
     ropas = relationship("Ropa", back_populates="proveedor")

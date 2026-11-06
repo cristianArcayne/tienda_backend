@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import exists
 
@@ -141,6 +141,8 @@ def eliminar_color(col_id: int, db: Session = Depends(get_db)):
     return {"message": "Color eliminado."}
 
 
+from core_tenant import obtener_tenant_id
+
 # ==========================================
 # PROVEEDORES
 # ==========================================
@@ -157,20 +159,33 @@ def _formatear_proveedor(p: Proveedor) -> ProveedorResponse:
     )
 
 @router.get("/proveedores", response_model=List[ProveedorResponse])
-def listar_proveedores(db: Session = Depends(get_db)):
-    proveedores = db.query(Proveedor).order_by(Proveedor.id.asc()).all()
+def listar_proveedores(request: Request, db: Session = Depends(get_db)):
+    query = db.query(Proveedor)
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        query = query.filter(Proveedor.empresa_id == tenant_id)
+
+    proveedores = query.order_by(Proveedor.id.asc()).all()
     return [_formatear_proveedor(p) for p in proveedores]
 
 @router.post("/proveedores", response_model=ProveedorResponse, status_code=status.HTTP_201_CREATED)
-def crear_proveedor(prov_in: ProveedorCreate, db: Session = Depends(get_db)):
+def crear_proveedor(prov_in: ProveedorCreate, request: Request, db: Session = Depends(get_db)):
     nombre_final = (prov_in.razon_social or prov_in.nombre or "").strip()
     if not nombre_final:
         raise HTTPException(status_code=400, detail="La razón social o nombre es obligatorio.")
 
-    if db.query(exists().where(Proveedor.razon_social == nombre_final)).scalar():
-        raise HTTPException(status_code=400, detail="Excepción A1: El proveedor ya existe.")
-    if prov_in.nit and db.query(exists().where(Proveedor.nit == prov_in.nit)).scalar():
-        raise HTTPException(status_code=400, detail="Excepción A1: El NIT ya está registrado.")
+    tenant_id = obtener_tenant_id(request, db)
+    if db.query(exists().where(Proveedor.razon_social == nombre_final, Proveedor.empresa_id == tenant_id)).scalar():
+        raise HTTPException(status_code=400, detail="Excepción A1: El proveedor ya existe para su empresa.")
+    if prov_in.nit and db.query(exists().where(Proveedor.nit == prov_in.nit, Proveedor.empresa_id == tenant_id)).scalar():
+        raise HTTPException(status_code=400, detail="Excepción A1: El NIT ya está registrado para su empresa.")
     
     nueva = Proveedor(
         razon_social=nombre_final,
@@ -178,7 +193,8 @@ def crear_proveedor(prov_in: ProveedorCreate, db: Session = Depends(get_db)):
         correo=prov_in.correo,
         direccion=prov_in.direccion,
         telefono=prov_in.telefono,
-        contacto=prov_in.contacto
+        contacto=prov_in.contacto,
+        empresa_id=tenant_id
     )
     db.add(nueva)
     db.commit()
@@ -236,12 +252,24 @@ router_proveedores_v1_compat = APIRouter(
 @router_proveedores_v1_compat.get("/")
 @router_proveedores_v1_compat.get("")
 def listar_proveedores_paginados(
+    request: Request,
     page: Optional[int] = None,
     page_size: int = 10,
     search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(Proveedor)
+    tenant_header = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or request.headers.get("x-tenant")
+        or request.query_params.get("empresa_id")
+        or request.query_params.get("tenant_id")
+    )
+    if tenant_header and str(tenant_header).lower() not in ["all", "todas", "global", "0", "null", "none"]:
+        tenant_id = obtener_tenant_id(request, db)
+        query = query.filter(Proveedor.empresa_id == tenant_id)
+
     if search:
         query = query.filter(Proveedor.razon_social.ilike(f"%{search}%"))
     
@@ -274,8 +302,8 @@ def obtener_proveedor_compat(prov_id: int, db: Session = Depends(get_db)):
 @router_proveedores_compat.post("", response_model=ProveedorResponse, status_code=status.HTTP_201_CREATED)
 @router_proveedores_v1_compat.post("/", response_model=ProveedorResponse, status_code=status.HTTP_201_CREATED)
 @router_proveedores_v1_compat.post("", response_model=ProveedorResponse, status_code=status.HTTP_201_CREATED)
-def crear_proveedor_compat(prov_in: ProveedorCreate, db: Session = Depends(get_db)):
-    return crear_proveedor(prov_in=prov_in, db=db)
+def crear_proveedor_compat(prov_in: ProveedorCreate, request: Request, db: Session = Depends(get_db)):
+    return crear_proveedor(prov_in=prov_in, request=request, db=db)
 
 @router_proveedores_compat.put("/{prov_id}", response_model=ProveedorResponse)
 @router_proveedores_compat.put("/{prov_id}/", response_model=ProveedorResponse)

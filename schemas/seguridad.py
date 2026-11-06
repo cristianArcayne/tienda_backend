@@ -33,6 +33,8 @@ class LoginResponse(BaseModel):
     is_superuser: bool
     roles: List[str]
     permisos: List[str]
+    empresa_id: Optional[int] = None
+    empresa_nombre: Optional[str] = None
     
 class RecuperarPasswordRequest(BaseModel):
     username_or_email: Optional[str] = None

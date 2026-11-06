@@ -9,12 +9,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 
+import uuid
 from database import get_db
 from models.venta import Venta, DetalleVenta
 from models.catalogo import VariantePrenda, Ropa, Talla, Color
+from models.sucursal import InventarioSucursal, MovimientoInventario
 from models.devolucion import Devolucion
 from models.notificacion import SuscripcionPushModel
 from routers.notificaciones import crear_notificacion_sistema
+
+PLAZO_GARANTIA_HORAS = 168.0  # 7 Días de Garantía Legal Oficial (7 * 24h = 168 horas)
 
 router = APIRouter(
     prefix="/api/v1/devoluciones",
@@ -38,6 +42,16 @@ class SolicitudDevolucionCreate(BaseModel):
     motivo: str = Field(..., min_length=3, description="Motivo detallado de la devolución")
     cuenta_bancaria_qr: Optional[str] = Field(None, description="Cuenta bancaria o alias QR para el reembolso")
     cliente_id: Optional[str] = None
+
+
+class SolicitudCambioTallaCreate(BaseModel):
+    venta_id: int
+    variante_devuelta_id: int
+    nueva_variante_id: int
+    cantidad: Optional[int] = Field(1, ge=1, description="Cantidad de prendas a cambiar")
+    motivo: Optional[str] = Field("Cambio de talla / ajuste físico de prenda", description="Motivo del cambio")
+    cliente_id: Optional[str] = None
+    metodo_pago_diferencia: Optional[str] = Field("QR", description="Efectivo, Tarjeta o QR")
 
 
 class ResponderDevolucionRequest(BaseModel):
@@ -68,7 +82,8 @@ def _serializar_devolucion(dev: Devolucion) -> dict:
         horas_transcurridas = _calcular_horas_transcurridas(dev.venta.fecha)
     elif dev.fecha_solicitud:
         horas_transcurridas = _calcular_horas_transcurridas(dev.fecha_solicitud)
-    es_elegible_24h = horas_transcurridas <= 24.0
+    es_elegible_garantia = horas_transcurridas <= PLAZO_GARANTIA_HORAS
+    es_elegible_24h = es_elegible_garantia
 
     motivo_raw = dev.motivo or ""
     cuenta_qr = None
@@ -120,6 +135,8 @@ def _serializar_devolucion(dev: Devolucion) -> dict:
         "monto_reembolso": float(dev.monto_reembolso) if dev.monto_reembolso else (float(dev.venta.total) if dev.venta else 0.0),
         "horas_transcurridas": round(horas_transcurridas, 2),
         "es_elegible_24h": es_elegible_24h,
+        "es_elegible_garantia_7dias": es_elegible_garantia,
+        "plazo_garantia_horas": PLAZO_GARANTIA_HORAS,
         "items": items_detalles,
         "venta": {
             "id": dev.venta.id,
@@ -159,14 +176,14 @@ def verificar_elegibilidad(venta_id: int, db: Session = Depends(get_db)):
     
     # Calcular horas transcurridas desde la venta (timezone-aware)
     horas_transcurridas = _calcular_horas_transcurridas(venta.fecha)
-    horas_restantes = max(0.0, 24.0 - horas_transcurridas)
-    elegible = (horas_transcurridas <= 24.0) and (dev_existente is None)
+    horas_restantes = max(0.0, PLAZO_GARANTIA_HORAS - horas_transcurridas)
+    elegible = (horas_transcurridas <= PLAZO_GARANTIA_HORAS) and (dev_existente is None)
 
     motivo_inelegible = None
     if dev_existente:
         motivo_inelegible = f"Ya existe una solicitud de devolución registrada ({dev_existente.estado})."
     elif horas_transcurridas > 24.0:
-        motivo_inelegible = f"El plazo de 24 horas ha expirado ({round(horas_transcurridas, 1)} horas transcurridas)."
+        motivo_inelegible = f"El plazo de garantía legal de 7 días (168 horas) ha expirado ({round(horas_transcurridas, 1)} horas transcurridas)."
 
     return {
         "venta_id": venta_id,
@@ -201,10 +218,10 @@ def solicitar_devolucion(body: SolicitudDevolucionCreate, db: Session = Depends(
 
     # Regla de negocio: 24 horas (timezone-safe)
     horas_transcurridas = _calcular_horas_transcurridas(venta.fecha)
-    if horas_transcurridas > 24.0:
+    if horas_transcurridas > PLAZO_GARANTIA_HORAS:
         raise HTTPException(
             status_code=400,
-            detail=f"El plazo límite de 24 horas para solicitar una devolución ha expirado. (Tiempo transcurrido: {round(horas_transcurridas, 1)} horas)."
+            detail=f"El plazo legal de garantía de 7 días (168 horas) para solicitar una devolución ha expirado. (Tiempo transcurrido: {round(horas_transcurridas, 1)} horas)."
         )
 
     # Verificar que no exista otra devolución previa
@@ -385,6 +402,27 @@ def responder_devolucion_admin(devolucion_id: int, body: ResponderDevolucionRequ
     if dev.venta:
         if nuevo_estado == "APROBADA":
             dev.venta.estado_pago = "DEVUELTA"
+            # Regla de Negocio Segundo Parcial: Reingreso físico al inventario (+1 stock por prenda)
+            if getattr(dev.venta, 'detalles', None):
+                for d in dev.venta.detalles:
+                    inv = db.query(InventarioSucursal).filter(
+                        InventarioSucursal.sucursal_id == dev.venta.sucursal_id,
+                        InventarioSucursal.variante_id == d.variante_id
+                    ).first()
+                    if inv:
+                        inv.stock_fisico += d.cantidad
+                        mov = MovimientoInventario(
+                            sucursal_id=dev.venta.sucursal_id,
+                            variante_id=d.variante_id,
+                            tipo_movimiento="ENTRADA",
+                            cantidad=d.cantidad,
+                            stock_anterior=inv.stock_fisico - d.cantidad,
+                            stock_nuevo=inv.stock_fisico,
+                            motivo=f"Reingreso por Devolución #{dev.id} de Venta #{dev.venta_id}",
+                            fecha=datetime.utcnow(),
+                            usuario_ci="1001"
+                        )
+                        db.add(mov)
         elif nuevo_estado == "RECHAZADA":
             dev.venta.estado_pago = "COMPLETADA"
 
@@ -409,3 +447,153 @@ def responder_devolucion_admin(devolucion_id: int, body: ResponderDevolucionRequ
         "devolucion": _serializar_devolucion(dev)
     }
 
+
+
+
+# ==============================================================================
+# FLUJO DE CAMBIO DE PRENDA / TALLA (GARANTÍA LEGAL DE 7 DÍAS)
+# ==============================================================================
+@router.post("/cambio-talla", summary="Procesar Cambio de Talla con Garantía de 7 Días")
+@router.post("/cambio-talla/", include_in_schema=False)
+@router_compat.post("/cambio-talla")
+@router_compat.post("/cambio-talla/", include_in_schema=False)
+def procesar_cambio_talla(body: SolicitudCambioTallaCreate, db: Session = Depends(get_db)):
+    """
+    CU-12: Gestionar Cambio de Prenda o Talla dentro de la Garantía de 7 Días.
+    - Valida vigencia de 7 días (168 horas).
+    - Reconoce el crédito original pagado por la prenda devuelta.
+    - Calcula la diferencia de precio si la nueva prenda/talla tiene costo superior.
+    - Efectúa reingreso a inventario de la prenda devuelta (+1 stock) y descuento de la nueva (-1 stock).
+    - Emite Nota de Cambio oficial con estados: 'PAGADO_POR_ENTREGAR' o 'ENTREGADO_CONFORME'.
+    - Dispara Notificación PUSH al cliente.
+    """
+    venta = db.query(Venta).options(
+        joinedload(Venta.cliente),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.ropa),
+        joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.talla)
+    ).filter(Venta.id == body.venta_id).first()
+    if not venta:
+        raise HTTPException(status_code=404, detail="Venta original no encontrada.")
+
+    # 1. Validar plazo de garantía de 7 días (168 horas)
+    horas = _calcular_horas_transcurridas(venta.fecha)
+    if horas > PLAZO_GARANTIA_HORAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El plazo de garantía legal de 7 días ha expirado ({round(horas, 1)} horas transcurridas)."
+        )
+
+    # 2. Localizar prenda vendida a devolver
+    item_original = next((d for d in (venta.detalles or []) if d.variante_id == body.variante_devuelta_id), None)
+    if not item_original:
+        raise HTTPException(status_code=400, detail="La prenda seleccionada para cambio no pertenece a esta venta.")
+
+    # 3. Localizar nueva variante solicitada
+    nueva_variante = db.query(VariantePrenda).options(
+        joinedload(VariantePrenda.ropa),
+        joinedload(VariantePrenda.talla),
+        joinedload(VariantePrenda.color)
+    ).filter(VariantePrenda.id == body.nueva_variante_id).first()
+    if not nueva_variante:
+        raise HTTPException(status_code=404, detail="La nueva variante de prenda no existe en el catálogo.")
+
+    # 4. Validar existencias físicas en la sucursal para la nueva variante
+    inv_nuevo = db.query(InventarioSucursal).filter(
+        InventarioSucursal.sucursal_id == venta.sucursal_id,
+        InventarioSucursal.variante_id == body.nueva_variante_id
+    ).first()
+    stock_disp = inv_nuevo.stock_disponible if inv_nuevo else 0
+    if not inv_nuevo or stock_disp < body.cantidad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stock insuficiente de la nueva talla '{nueva_variante.talla.medida if nueva_variante.talla else ''}' en esta sucursal (Disponible: {stock_disp})."
+        )
+
+    # 5. Cálculo económico de diferencia de precio
+    precio_pagado_unitario = float(item_original.precio_unitario or (item_original.variante.ropa.precio if item_original.variante and item_original.variante.ropa else 0.0))
+    precio_nuevo_unitario = float(nueva_variante.ropa.precio if nueva_variante.ropa else 0.0)
+    
+    credito_original = precio_pagado_unitario * body.cantidad
+    costo_nuevo = precio_nuevo_unitario * body.cantidad
+    diferencia_a_pagar = max(0.0, round(costo_nuevo - credito_original, 2))
+
+    # 6. Movimiento de inventario dual (Reingreso +1 / Salida -1)
+    inv_devuelto = db.query(InventarioSucursal).filter(
+        InventarioSucursal.sucursal_id == venta.sucursal_id,
+        InventarioSucursal.variante_id == body.variante_devuelta_id
+    ).first()
+    if inv_devuelto:
+        inv_devuelto.stock_fisico += body.cantidad
+        mov_in = MovimientoInventario(
+            sucursal_id=venta.sucursal_id,
+            variante_id=body.variante_devuelta_id,
+            tipo_movimiento="ENTRADA",
+            cantidad=body.cantidad,
+            stock_anterior=inv_devuelto.stock_fisico - body.cantidad,
+            stock_nuevo=inv_devuelto.stock_fisico,
+            motivo=f"Reingreso de prenda por Cambio de Talla (Venta #{venta.id})",
+            fecha=datetime.utcnow(),
+            usuario_ci="1001"
+        )
+        db.add(mov_in)
+
+    inv_nuevo.stock_fisico -= body.cantidad
+    mov_out = MovimientoInventario(
+        sucursal_id=venta.sucursal_id,
+        variante_id=body.nueva_variante_id,
+        tipo_movimiento="SALIDA",
+        cantidad=body.cantidad,
+        stock_anterior=inv_nuevo.stock_fisico + body.cantidad,
+        stock_nuevo=inv_nuevo.stock_fisico,
+        motivo=f"Salida de nueva talla entregada por Cambio (Venta #{venta.id})",
+        fecha=datetime.utcnow(),
+        usuario_ci="1001"
+    )
+    db.add(mov_out)
+
+    # 7. Generación de Nota de Cambio Oficial
+    ahora_dt = datetime.now()
+    nro_nota_cambio = f"NC-{ahora_dt.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    estado_cambio = "ENTREGADO_CONFORME" if diferencia_a_pagar == 0.0 else "PAGADO_POR_ENTREGAR"
+
+    # 8. Notificación PUSH al Cliente y Bitácora
+    cli_nom = f"{venta.cliente.nombre} {getattr(venta.cliente, 'apellido_pat', '')}".strip() if venta.cliente else "Cliente"
+    prenda_vieja_nom = item_original.variante.ropa.nombre if (item_original.variante and item_original.variante.ropa) else "Prenda Original"
+    prenda_nueva_nom = nueva_variante.ropa.nombre if nueva_variante.ropa else "Prenda Nueva"
+    talla_nueva = nueva_variante.talla.medida if nueva_variante.talla else "Única"
+
+    try:
+        crear_notificacion_sistema(
+            db=db,
+            titulo=f"🔄 Cambio de Talla Procesado - {nro_nota_cambio}",
+            mensaje=f"Cambio aprobado para {cli_nom}: de '{prenda_vieja_nom}' a '{prenda_nueva_nom} (Talla {talla_nueva})'. Diferencia abonada: Bs. {diferencia_a_pagar:.2f}.",
+            tipo="DEVOLUCION"
+        )
+    except Exception as e:
+        print(f"[CambioTalla] Error notificando: {e}")
+
+    db.commit()
+
+    return {
+        "success": True,
+        "nro_nota_cambio": nro_nota_cambio,
+        "estado": estado_cambio,
+        "venta_id": venta.id,
+        "sucursal_id": venta.sucursal_id,
+        "cliente_nombre": cli_nom,
+        "prenda_devuelta": {
+            "variante_id": body.variante_devuelta_id,
+            "nombre": prenda_vieja_nom,
+            "credito_reconocido": credito_original
+        },
+        "prenda_nueva": {
+            "variante_id": body.nueva_variante_id,
+            "nombre": prenda_nueva_nom,
+            "talla": talla_nueva,
+            "costo_nuevo": costo_nuevo
+        },
+        "diferencia_a_pagar": diferencia_a_pagar,
+        "metodo_pago_diferencia": body.metodo_pago_diferencia,
+        "fecha": ahora_dt.isoformat(),
+        "mensaje": f"Nota de Cambio {nro_nota_cambio} emitida con éxito bajo la Garantía Legal de 7 Días."
+    }

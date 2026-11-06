@@ -100,9 +100,16 @@ router_compat = APIRouter(
 
 
 def _garantizar_inventario_sucursal(db: Session, sucursal_id: int):
-    """Garantiza que todas las ropas tengan variantes y que todas las variantes tengan un registro en la sucursal"""
-    # 1. Asegurar que toda Ropa activa tenga al menos una variante
-    ropas = db.query(Ropa).filter(Ropa.activo == True).all()
+    """Garantiza que todas las ropas de la empresa de la sucursal tengan variantes y existencias"""
+    sucursal = db.query(Sucursal).filter(Sucursal.id == sucursal_id).first()
+    empresa_id = getattr(sucursal, 'empresa_id', None) if sucursal else None
+
+    # 1. Asegurar que toda Ropa activa de esta empresa tenga al menos una variante
+    query_ropas = db.query(Ropa).filter(Ropa.activo == True)
+    if empresa_id:
+        query_ropas = query_ropas.filter(Ropa.empresa_id == empresa_id)
+    ropas = query_ropas.all()
+
     talla_def = db.query(Talla).filter(Talla.medida == "M").first() or db.query(Talla).first()
     color_def = db.query(Color).first()
 
@@ -121,7 +128,11 @@ def _garantizar_inventario_sucursal(db: Session, sucursal_id: int):
             db.add(nueva_var)
             db.flush()
 
-    variantes = db.query(VariantePrenda).filter(VariantePrenda.activo == True).all()
+    query_vars = db.query(VariantePrenda).join(Ropa, VariantePrenda.ropa_id == Ropa.id).filter(VariantePrenda.activo == True)
+    if empresa_id:
+        query_vars = query_vars.filter(Ropa.empresa_id == empresa_id)
+    variantes = query_vars.all()
+
     existentes = {
         inv.variante_id for inv in db.query(InventarioSucursal).filter(InventarioSucursal.sucursal_id == sucursal_id).all()
     }
@@ -167,6 +178,8 @@ def _obtener_inventario_sucursal_impl(
         .filter(InventarioSucursal.sucursal_id == sucursal_id)
         .order_by(Ropa.nombre.asc(), VariantePrenda.sku.asc())
     )
+    if getattr(sucursal, 'empresa_id', None):
+        query = query.filter(Ropa.empresa_id == sucursal.empresa_id)
 
     if categoria_id:
         query = query.filter(Ropa.categoria_id == categoria_id)
