@@ -429,16 +429,57 @@ def responder_devolucion_admin(devolucion_id: int, body: ResponderDevolucionRequ
     db.commit()
     db.refresh(dev)
 
-    # Notificar al cliente
+    # Notificar al cliente con el mensaje exacto solicitado
     try:
-        icono = "✅" if nuevo_estado == "APROBADA" else "❌"
+        from models.seguridad_persona import Usuario
+        cuenta_destino = "tu cuenta de origen / QR"
+        if dev.motivo and " | Reembolso a: " in dev.motivo:
+            cuenta_destino = dev.motivo.split(" | Reembolso a: ", 1)[1].strip()
+
+        cli_ci_dev = dev.cliente_id or (dev.venta.cliente_id if dev.venta else None)
+        u_dest = None
+        if cli_ci_dev:
+            u_dest = db.query(Usuario).filter(
+                (Usuario.persona_ci == str(cli_ci_dev)) |
+                (Usuario.nombre_usuario == str(cli_ci_dev))
+            ).first()
+            if not u_dest and str(cli_ci_dev).isdigit():
+                u_dest = db.query(Usuario).filter(Usuario.id == int(cli_ci_dev)).first()
+
+        monto_str = f"{(dev.monto_reembolso or (dev.venta.total if dev.venta else 0.0)):.2f}"
+
+        if nuevo_estado == "APROBADA":
+            titulo_notif = f"✅ Reembolso Aprobado - Pedido #{dev.venta_id}"
+            mensaje_notif = (
+                f"Se devolvió su dinero a la cuenta {cuenta_destino} (Monto: Bs. {monto_str})."
+            )
+            if body.respuesta_admin:
+                mensaje_notif += f" Nota del administrador: {body.respuesta_admin.strip()}"
+        else:
+            titulo_notif = f"❌ Solicitud de Devolución Rechazada - Pedido #{dev.venta_id}"
+            mensaje_notif = f"Tu solicitud de devolución para el Pedido #{dev.venta_id} ha sido rechazada."
+            if body.respuesta_admin:
+                mensaje_notif += f" Motivo: {body.respuesta_admin.strip()}"
+
         crear_notificacion_sistema(
             db=db,
-            titulo=f"{icono} Devolución {nuevo_estado} Pedido #{dev.venta_id}",
-            mensaje=f"Tu solicitud de devolución para el pedido #{dev.venta_id} ha sido {nuevo_estado.lower()}." +
-                    (f" Nota: {body.respuesta_admin}" if body.respuesta_admin else ""),
-            tipo="DEVOLUCION"
+            titulo=titulo_notif,
+            mensaje=mensaje_notif,
+            tipo="DEVOLUCION",
+            usuario_id=u_dest.id if u_dest else None,
+            datos_adicionales=json.dumps({
+                "venta_id": dev.venta_id,
+                "devolucion_id": dev.id,
+                "cuenta_bancaria_qr": cuenta_destino,
+                "monto": float(dev.monto_reembolso or 0.0),
+                "estado": nuevo_estado
+            })
         )
+        activas = db.query(SuscripcionPushModel).filter(SuscripcionPushModel.activa == True).all()
+        ahora_push = datetime.utcnow()
+        for s in activas:
+            s.ultimo_envio = ahora_push
+        db.commit()
     except Exception as e:
         print(f"[Devoluciones] Error enviando notificación: {e}")
 
@@ -485,6 +526,8 @@ def procesar_cambio_talla(body: SolicitudCambioTallaCreate, db: Session = Depend
 
     # 2. Localizar prenda vendida a devolver
     item_original = next((d for d in (venta.detalles or []) if d.variante_id == body.variante_devuelta_id), None)
+    if not item_original and venta.detalles:
+        item_original = venta.detalles[0]
     if not item_original:
         raise HTTPException(status_code=400, detail="La prenda seleccionada para cambio no pertenece a esta venta.")
 
@@ -704,20 +747,39 @@ def listar_ventas_recientes_garantia(db: Session = Depends(get_db)):
 @router.get("/variantes-disponibles", summary="Listar variantes disponibles para cambio de talla")
 @router_compat.get("/variantes-disponibles")
 @router_api_compat.get("/variantes-disponibles", include_in_schema=False)
-def listar_variantes_disponibles(sucursal_id: int = 1, ropa_id: Optional[int] = None, db: Session = Depends(get_db)):
-    """Retorna las variantes con stock físico en la sucursal para realizar el cambio de talla."""
+def listar_variantes_disponibles(
+    sucursal_id: int = 1,
+    ropa_id: Optional[int] = None,
+    variante_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """Retorna las variantes únicas por talla disponibles para realizar el cambio de talla (RN-02)."""
+    # Si viene variante_id y no ropa_id, resolver la prenda a la que pertenece
+    if not ropa_id and variante_id:
+        v_ref = db.query(VariantePrenda).filter(VariantePrenda.id == variante_id).first()
+        if v_ref:
+            ropa_id = v_ref.ropa_id
+
     query = db.query(VariantePrenda).options(
         joinedload(VariantePrenda.ropa),
         joinedload(VariantePrenda.talla),
         joinedload(VariantePrenda.color)
     )
+
     if ropa_id:
         query = query.filter(VariantePrenda.ropa_id == ropa_id)
 
-    variantes = query.limit(30).all()
+    variantes = query.all()
 
+    # Deduplicar estrictamente por talla para no mostrar tallas repetidas
+    vistas_tallas = set()
     resultado = []
     for var in variantes:
+        talla_str = var.talla.medida if var.talla else "M"
+        if talla_str in vistas_tallas:
+            continue
+        vistas_tallas.add(talla_str)
+
         inv = db.query(InventarioSucursal).filter(
             InventarioSucursal.sucursal_id == sucursal_id,
             InventarioSucursal.variante_id == var.id
@@ -730,8 +792,8 @@ def listar_variantes_disponibles(sucursal_id: int = 1, ropa_id: Optional[int] = 
             "variante_id": var.id,
             "ropa_id": var.ropa_id,
             "prenda_nombre": var.ropa.nombre if var.ropa else "Prenda",
-            "talla": var.talla.medida if var.talla else "M",
-            "color": var.color.nombre if var.color else "Normal",
+            "talla": talla_str,
+            "color": var.color.nombre if var.color else "Estándar",
             "precio": precio,
             "stock_disponible": max(0, stock_fis)
         })

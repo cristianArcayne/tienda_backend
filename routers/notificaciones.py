@@ -112,6 +112,7 @@ def _formatear_notificacion(n: NotificacionModel) -> Dict[str, Any]:
         "mensaje": n.mensaje,
         "tipo": n.tipo,
         "leida": bool(n.leida),
+        "usuario_id": n.usuario_id,
         "fecha_creacion": n.fecha_creacion.isoformat() if n.fecha_creacion else datetime.utcnow().isoformat(),
         "created_at": n.fecha_creacion.isoformat() if n.fecha_creacion else datetime.utcnow().isoformat(),
         "datos_adicionales": n.datos_adicionales
@@ -124,11 +125,25 @@ def _formatear_notificacion(n: NotificacionModel) -> Dict[str, Any]:
 
 def _listar_feed_impl(
     tipo: Optional[str] = None,
+    usuario_id: Optional[int] = Query(None, description="Filtrar por usuario específico (incluye difusión global)"),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db)
 ):
-    """Retorna el listado de notificaciones para la app móvil y frontend."""
+    """Retorna el listado de notificaciones para la app móvil y frontend asegurando aislamiento estricto."""
     query = db.query(NotificacionModel).order_by(NotificacionModel.id.desc())
+    tipos_globales = ["PROMOCION", "BROADCAST", "SISTEMA", "PUBLICIDAD"]
+
+    if usuario_id is not None and usuario_id > 0:
+        query = query.filter(
+            (NotificacionModel.usuario_id == usuario_id) |
+            (NotificacionModel.usuario_id.is_(None) & NotificacionModel.tipo.in_(tipos_globales))
+        )
+    else:
+        # Invitados o sin sesión: sólo ver anuncios globales, JAMÁS compras ni reservas ajenas
+        query = query.filter(
+            NotificacionModel.usuario_id.is_(None) & NotificacionModel.tipo.in_(tipos_globales)
+        )
+
     if tipo:
         query = query.filter(NotificacionModel.tipo.ilike(f"%{tipo}%"))
     

@@ -34,6 +34,7 @@ class ReservaCreate(BaseModel):
     hora_estimada: Optional[str] = "18:00"
     detalles: Optional[List[DetalleReservaCreate]] = None
     items: Optional[List[DetalleReservaCreate]] = None
+    uuid_transaccion: Optional[str] = None
 
 
 class ReservaResponse(BaseModel):

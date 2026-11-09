@@ -23,6 +23,8 @@ class DetalleCarritoResponse(BaseModel):
     subtotal: Optional[float] = None
     talla: Optional[str] = None
     color: Optional[str] = None
+    prenda_id: Optional[int] = None
+    imagen_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

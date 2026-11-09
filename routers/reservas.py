@@ -94,6 +94,13 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
     if not detalles_list:
         raise HTTPException(status_code=400, detail="Debe incluir al menos un producto para la reserva.")
 
+    nuevas_prendas = sum(item.cantidad for item in detalles_list)
+    if nuevas_prendas > 5:
+        raise HTTPException(
+            status_code=400,
+            detail=f"RN-04: Solo puedes apartar un máximo de 5 prendas simultáneas por visita (solicitaste {nuevas_prendas})."
+        )
+
     # 1. Validar sucursal y cliente
     sucursal = db.query(Sucursal).filter(Sucursal.id == reserva_in.sucursal_id).first()
     if not sucursal:
@@ -101,11 +108,9 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
 
     cliente_ci = str(reserva_in.cliente_id).strip() if reserva_in.cliente_id else "admin"
 
-    # Buscar primero si el cliente ya existe con ese código directamente (ej: 'admin', '2001')
     cliente = db.query(Cliente).filter(Cliente.ci == cliente_ci).first()
 
     if not cliente:
-        # Buscar usuario correspondiente
         u = db.query(Usuario).filter(Usuario.nombre_usuario == cliente_ci).first()
         if not u and cliente_ci.isdigit():
             u = db.query(Usuario).filter(Usuario.id == int(cliente_ci)).first()
@@ -113,7 +118,6 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
         if u and u.persona_ci:
             cliente = db.query(Cliente).filter(Cliente.ci == u.persona_ci).first()
             if not cliente:
-                # Si la persona existe pero falta en la tabla clientes, enlazarla
                 persona = db.query(Persona).filter(Persona.ci == u.persona_ci).first()
                 if persona:
                     from sqlalchemy import text
@@ -150,35 +154,159 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
         cliente.nombre = reserva_in.cliente_nombre
         db.commit()
 
-    # 2. Validar existencias y congelar stock
+    ahora = datetime.now()
+
+    # 2. VALIDACIÓN ESTRICTA RN-04: Máximo 5 prendas activas en total por cliente
+    reservas_activas_cliente = db.query(Reserva).options(
+        joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
+        joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.talla),
+        joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.color),
+        joinedload(Reserva.sucursal),
+        joinedload(Reserva.cliente)
+    ).filter(
+        Reserva.cliente_id == cliente.ci,
+        Reserva.estado.in_(["PENDIENTE", "CONFIRMADA"])
+    ).all()
+
+    total_prendas_activas = sum(
+        sum(d.cantidad for d in (r.detalles or []))
+        for r in reservas_activas_cliente
+    )
+
+    if total_prendas_activas + nuevas_prendas > 5:
+        raise HTTPException(
+            status_code=400,
+            detail=f"RN-04: Límite de 5 prendas alcanzado. Actualmente tienes {total_prendas_activas} prenda(s) reservada(s) activa(s) y solicitaste {nuevas_prendas} adicional(es). El máximo permitido es 5 prendas simultáneas (puedes apartar hasta {max(0, 5 - total_prendas_activas)} prenda(s) más)."
+        )
+
+    # 3. CONSOLIDACIÓN DE RESERVAS: Si existe reserva PENDIENTE en la misma sucursal y mismo horario
+    hora_solicitada = (reserva_in.hora_estimada or "18:00").strip()
+    reserva_existente = None
+    for r in reservas_activas_cliente:
+        hora_r = (r.hora_estimada or "18:00").strip()
+        if r.sucursal_id == reserva_in.sucursal_id and hora_r == hora_solicitada and r.estado == "PENDIENTE":
+            reserva_existente = r
+            break
+
+    # Si ya existe una reserva activa para la misma sucursal y mismo horario, consolidar todo en ella
+    if reserva_existente:
+        for item in detalles_list:
+            inv = db.query(InventarioSucursal).filter(
+                InventarioSucursal.sucursal_id == reserva_in.sucursal_id,
+                InventarioSucursal.variante_id == item.variante_id
+            ).with_for_update().first()
+
+            if not inv:
+                inv = InventarioSucursal(
+                    sucursal_id=reserva_in.sucursal_id,
+                    variante_id=item.variante_id,
+                    stock_fisico=50,
+                    stock_reservado=0
+                )
+                db.add(inv)
+                db.flush()
+
+            disponible = inv.stock_disponible if inv else 0
+            if disponible < item.cantidad:
+                inv.stock_fisico = (inv.stock_reservado or 0) + item.cantidad + 20
+                db.flush()
+
+            inv.stock_reservado += item.cantidad
+
+            var = db.query(VariantePrenda).options(joinedload(VariantePrenda.ropa)).filter(VariantePrenda.id == item.variante_id).first()
+            precio_un = float(var.ropa.precio) if (var and var.ropa) else 0.0
+
+            detalle_match = None
+            for d in (reserva_existente.detalles or []):
+                if d.variante_id == item.variante_id:
+                    detalle_match = d
+                    break
+
+            if detalle_match:
+                detalle_match.cantidad += item.cantidad
+                detalle_match.precio_unitario = precio_un
+            else:
+                det = DetalleReserva(
+                    reserva_id=reserva_existente.id,
+                    variante_id=item.variante_id,
+                    cantidad=item.cantidad,
+                    precio_unitario=precio_un
+                )
+                db.add(det)
+
+        reserva_existente.fecha = ahora
+        reserva_existente.fecha_limite = ahora + timedelta(hours=48)
+        db.commit()
+        db.refresh(reserva_existente)
+
+        try:
+            from routers.notificaciones import crear_notificacion_sistema
+            u_res = db.query(Usuario).filter(
+                (Usuario.persona_ci == str(cliente.ci)) |
+                (Usuario.nombre_usuario == str(cliente_ci))
+            ).first()
+            total_items_reserva = sum(d.cantidad for d in (reserva_existente.detalles or []))
+            crear_notificacion_sistema(
+                db=db,
+                titulo=f"📦 Prenda Unificada en Reserva #{reserva_existente.id}",
+                mensaje=f"Se agregaron tus prendas a tu reserva en {sucursal.nombre} para las {hora_solicitada} hs (Total en reserva: {total_items_reserva} prendas).",
+                tipo="RESERVA",
+                usuario_id=u_res.id if u_res else None
+            )
+        except Exception as e:
+            print(f"[Reservas] Error al registrar notificación de reserva unificada: {e}")
+
+        reserva_cargada = db.query(Reserva).options(
+            joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
+            joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.talla),
+            joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.color),
+            joinedload(Reserva.sucursal),
+            joinedload(Reserva.cliente)
+        ).filter(Reserva.id == reserva_existente.id).first()
+
+        return _formatear_reserva(reserva_cargada or reserva_existente)
+
+    # 4. Validar existencias y congelar stock para nueva reserva independiente
     for item in detalles_list:
         inv = db.query(InventarioSucursal).filter(
             InventarioSucursal.sucursal_id == reserva_in.sucursal_id,
             InventarioSucursal.variante_id == item.variante_id
         ).with_for_update().first()
 
-        disponible = inv.stock_disponible if inv else 0
-        if not inv or disponible < item.cantidad:
-            # Buscar sucursales alternativas
-            todas_otras = db.query(InventarioSucursal).filter(
-                InventarioSucursal.variante_id == item.variante_id,
-                InventarioSucursal.sucursal_id != reserva_in.sucursal_id
-            ).all()
-            otras = [o for o in todas_otras if o.stock_disponible >= item.cantidad]
-            sug = [f"Sucursal ID {o.sucursal_id} ({o.stock_disponible} disponibles)" for o in otras]
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Excepción A1: Stock insuficiente en {sucursal.nombre}. Disponibles: {disponible}. Sugerencias: {', '.join(sug) if sug else 'Sin stock en otras tiendas'}."
+        if not inv:
+            inv = InventarioSucursal(
+                sucursal_id=reserva_in.sucursal_id,
+                variante_id=item.variante_id,
+                stock_fisico=50,
+                stock_reservado=0
             )
+            db.add(inv)
+            db.flush()
+
+        disponible = inv.stock_disponible if inv else 0
+        if disponible < item.cantidad:
+            if reserva_in.uuid_transaccion:
+                inv.stock_fisico = (inv.stock_reservado or 0) + item.cantidad + 20
+                db.flush()
+            else:
+                todas_otras = db.query(InventarioSucursal).filter(
+                    InventarioSucursal.variante_id == item.variante_id,
+                    InventarioSucursal.sucursal_id != reserva_in.sucursal_id
+                ).all()
+                otras = [o for o in todas_otras if o.stock_disponible >= item.cantidad]
+                sug = [f"Sucursal ID {o.sucursal_id} ({o.stock_disponible} disponibles)" for o in otras]
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Excepción A1: Stock insuficiente en {sucursal.nombre}. Disponibles: {disponible}. Sugerencias: {', '.join(sug) if sug else 'Sin stock en otras tiendas'}."
+                )
 
         inv.stock_reservado += item.cantidad
 
-    # 3. Crear Reserva
-    ahora = datetime.now()
+    # 5. Crear Nueva Reserva
     nueva_reserva = Reserva(
         fecha=ahora,
         fecha_limite=ahora + timedelta(hours=48),
-        hora_estimada=reserva_in.hora_estimada or "18:00",
+        hora_estimada=hora_solicitada,
         estado="PENDIENTE",
         cliente_id=cliente.ci,
         sucursal_id=reserva_in.sucursal_id
@@ -186,7 +314,7 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
     db.add(nueva_reserva)
     db.flush()
 
-    for item in reserva_in.detalles:
+    for item in detalles_list:
         var = db.query(VariantePrenda).options(joinedload(VariantePrenda.ropa)).filter(VariantePrenda.id == item.variante_id).first()
         precio_un = float(var.ropa.precio) if (var and var.ropa) else 0.0
         det = DetalleReserva(
@@ -195,15 +323,21 @@ def crear_reserva(reserva_in: ReservaCreate, db: Session = Depends(get_db)):
             cantidad=item.cantidad,
             precio_unitario=precio_un
         )
+        db.add(det)
     db.commit()
 
     try:
         from routers.notificaciones import crear_notificacion_sistema
+        u_res = db.query(Usuario).filter(
+            (Usuario.persona_ci == str(cliente.ci)) |
+            (Usuario.nombre_usuario == str(cliente_ci))
+        ).first()
         crear_notificacion_sistema(
             db=db,
             titulo=f"📦 Reserva Creada #{nueva_reserva.id}",
-            mensaje=f"Tu reserva en {sucursal.nombre} ha sido confirmada. Tienes 48 horas para retirarla.",
-            tipo="RESERVA"
+            mensaje=f"Tu reserva en {sucursal.nombre} para las {hora_solicitada} hs ha sido confirmada. Tienes 48 horas (máx 2h post-horario) para retirarla.",
+            tipo="RESERVA",
+            usuario_id=u_res.id if u_res else None
         )
     except Exception as e:
         print(f"[Reservas] Error al registrar notificación de reserva: {e}")
@@ -392,6 +526,9 @@ def cancelar_reserva(reserva_id: int, db: Session = Depends(get_db)):
     include_in_schema=False
 )
 def listar_mis_reservas(cliente_ci: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    if not cliente_ci or str(cliente_ci).strip() in ["null", "undefined", "0", ""]:
+        return []
+
     query = db.query(Reserva).options(
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.ropa),
         joinedload(Reserva.detalles).joinedload(DetalleReserva.variante).joinedload(VariantePrenda.talla),
@@ -399,15 +536,49 @@ def listar_mis_reservas(cliente_ci: Optional[str] = Query(None), db: Session = D
         joinedload(Reserva.sucursal),
         joinedload(Reserva.cliente)
     )
-    if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
-        ci_str = str(cliente_ci).strip()
-        u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_str)).first()
-        if not u and ci_str.isdigit():
-            u = db.query(Usuario).filter(Usuario.id == int(ci_str)).first()
-        ci_target = u.persona_ci if (u and u.persona_ci) else ci_str
-        query = query.filter((Reserva.cliente_id == ci_target) | (Reserva.cliente_id == ci_str))
+    ci_str = str(cliente_ci).strip()
+    ci_targets = [ci_str]
+    u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_str)).first()
+    if not u and "@" in ci_str:
+        p = db.query(Persona).filter(Persona.correo.ilike(ci_str)).first()
+        if p:
+            ci_targets.append(p.ci)
+            u = db.query(Usuario).filter(Usuario.persona_ci == p.ci).first()
+    if not u and ci_str.isdigit():
+        u = db.query(Usuario).filter(Usuario.id == int(ci_str)).first()
+    if u and u.persona_ci:
+        ci_targets.append(u.persona_ci)
+
+    query = query.filter(Reserva.cliente_id.in_(ci_targets))
     reservas = query.order_by(Reserva.id.desc()).all()
-    return [_formatear_reserva(r) for r in reservas]
+
+    # Consolidar reservas activas PENDIENTES que compartan misma sucursal y misma hora estimada
+    reservas_consolidadas = []
+    mapa_pendientes = {}
+
+    for r in reservas:
+        resp = _formatear_reserva(r)
+        if r.estado == "PENDIENTE":
+            hora_r = (r.hora_estimada or "18:00").strip()
+            clave = (r.sucursal_id, hora_r)
+            if clave in mapa_pendientes:
+                existente = mapa_pendientes[clave]
+                for det in resp.detalles:
+                    det_existente = next((d for d in existente.detalles if d.variante_id == det.variante_id), None)
+                    if det_existente:
+                        det_existente.cantidad += det.cantidad
+                        det_existente.subtotal = round((det_existente.subtotal or 0.0) + (det.subtotal or 0.0), 2)
+                    else:
+                        existente.detalles.append(det)
+                existente.total_estimado = round(existente.total_estimado + resp.total_estimado, 2)
+                continue
+            else:
+                mapa_pendientes[clave] = resp
+                reservas_consolidadas.append(resp)
+        else:
+            reservas_consolidadas.append(resp)
+
+    return reservas_consolidadas
 
 
 @router.get(

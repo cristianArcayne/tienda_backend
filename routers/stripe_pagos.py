@@ -171,7 +171,8 @@ def confirmar_pago_stripe(body: ConfirmarPagoStripeRequest, db: Session = Depend
             db=db,
             titulo=f"💳 Pago Exitoso con Stripe - Pedido #{venta.id}",
             mensaje=f"Tu pago de Bs. {float(venta.total):.2f} fue procesado correctamente mediante Stripe (Ref: {body.payment_intent_id[:16]}...).",
-            tipo="COMPRA"
+            tipo="COMPRA",
+            usuario_id=getattr(db.query( models_u := __import__('models.seguridad_persona', fromlist=['Usuario']).Usuario ).filter((models_u.persona_ci == str(venta.cliente_id)) | (models_u.nombre_usuario == str(venta.cliente_id))).first(), 'id', None) if venta.cliente_id else None
         )
     except Exception as err:
         print(f"[Stripe] Error notificando venta: {err}")

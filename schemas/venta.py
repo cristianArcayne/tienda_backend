@@ -44,6 +44,7 @@ class ItemVentaCreate(BaseModel):
 class DetalleVentaResponse(BaseModel):
     id: int
     variante_id: int
+    ropa_id: Optional[int] = None
     cantidad: int
     subtotal: float
     precio_unitario: Optional[float] = None
@@ -80,6 +81,7 @@ class VentaEcommerceCreate(BaseModel):
     razon_social: Optional[str] = "Sin Nombre"
     direccion_envio: Optional[str] = "Entrega a domicilio"
     token_pasarela: Optional[str] = "tok_simulado_aprobado"
+    uuid_transaccion: Optional[str] = None
     items: Optional[List[ItemVentaCreate]] = None
     notas: Optional[str] = None
 

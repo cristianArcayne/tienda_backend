@@ -60,6 +60,7 @@ def _formatear_venta(venta: Venta) -> VentaResponse:
         DetalleVentaResponse(
             id=d.id,
             variante_id=d.variante_id,
+            ropa_id=(d.variante.ropa_id if d.variante else None),
             cantidad=d.cantidad,
             subtotal=float(d.subtotal),
             precio_unitario=float(d.precio_unitario) if d.precio_unitario is not None else (float(d.variante.ropa.precio) if (d.variante and d.variante.ropa) else 0.0),
@@ -139,29 +140,35 @@ def _resolver_o_crear_cliente(db: Session, cliente_input: Optional[str], razon_s
 
     # 2. Si identificador coincide con un Usuario (ej: cajero_dismac_central)
     u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(identificador)).first()
+    if not u and "@" in identificador:
+        p_mail = db.query(Persona).filter(Persona.correo.ilike(identificador)).first()
+        if p_mail:
+            u = db.query(Usuario).filter(Usuario.persona_ci == p_mail.ci).first()
     if not u and identificador.isdigit():
         u = db.query(Usuario).filter(Usuario.id == int(identificador)).first()
 
     ci_evaluar = u.persona_ci if (u and u.persona_ci) else identificador
 
+    # Verificar si ya existe en clientes con ci_evaluar
+    cli_direct = db.query(Cliente).filter(Cliente.ci == ci_evaluar).first()
+    if cli_direct:
+        return cli_direct
+
     # Verificar si la persona ya existe en la tabla personas
     persona = db.query(Persona).filter(Persona.ci == ci_evaluar).first()
     if persona:
-        if persona.tipo_persona == "CLIENTE":
-            cli = db.query(Cliente).filter(Cliente.ci == persona.ci).first()
-            if cli:
-                return cli
-        else:
-            # Es un Empleado u otro rol; para no romper la herencia polimórfica en ventas:
-            default_cli = db.query(Cliente).first()
-            if default_cli:
-                return default_cli
+        from sqlalchemy import text
+        db.execute(text("INSERT INTO clientes (ci) VALUES (:ci) ON CONFLICT DO NOTHING"), {"ci": persona.ci})
+        db.flush()
+        cli = db.query(Cliente).filter(Cliente.ci == persona.ci).first()
+        if cli:
+            return cli
 
     # 3. Crear cliente nuevo para este identificador único
     nom_disp = razon_social if (razon_social and razon_social not in ["Sin Nombre", "Consumidor Final", "0"]) else identificador.capitalize()
     partes = nom_disp.split(" ", 1)
     cliente = Cliente(
-        ci=identificador,
+        ci=ci_evaluar,
         nombre=partes[0],
         apellido_pat=partes[1] if len(partes) > 1 else "Cliente",
         correo=f"{identificador.lower().replace(' ', '_')}@fashionstore.bo",
@@ -360,16 +367,23 @@ def _ejecutar_venta_pos_core(
 
     db.commit()
 
-    # Emitir notificación para móviles y web
+    # Emitir notificación para móviles y web dirigida al usuario titular de la compra
     try:
         from routers.notificaciones import crear_notificacion_sistema
         tipo_nombre = "E-commerce" if tipo_venta_id == 2 else "POS Tienda"
         monto_str = f"{(nueva_venta.monto_neto or nueva_venta.total or 0.0):.2f}"
+        u_titular = None
+        if nueva_venta.cliente_id:
+            u_titular = db.query(Usuario).filter(
+                (Usuario.persona_ci == str(nueva_venta.cliente_id)) |
+                (Usuario.nombre_usuario == str(nueva_venta.cliente_id))
+            ).first()
         crear_notificacion_sistema(
             db=db,
             titulo=f"🛍️ Compra Confirmada #{nueva_venta.id}",
             mensaje=f"Tu compra ({tipo_nombre}) por Bs. {monto_str} ha sido procesada con éxito.",
-            tipo="COMPRA"
+            tipo="COMPRA",
+            usuario_id=u_titular.id if u_titular else None
         )
     except Exception as e:
         print(f"[Ventas] Error al registrar notificación de venta: {e}")
@@ -430,10 +444,10 @@ def procesar_venta_pos(venta_in: VentaPOSCreate, db: Session = Depends(get_db)):
 @compat_router.post("/sincronizar-lote")
 @compat_router.post("/sincronizar-lote/", include_in_schema=False)
 def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)):
-    ventas_raw = payload.get("ventas", [])
+    ventas_raw = payload.get("ventas") or payload.get("operaciones") or []
     resultados = []
     for item in ventas_raw:
-        u_id = item.get("offline_uuid") or item.get("codigo_transaccion") or f"OFFLINE-{uuid.uuid4().hex[:8].upper()}"
+        u_id = item.get("offline_uuid") or item.get("uuid_offline") or item.get("uuid_transaccion") or item.get("codigo_transaccion") or f"OFFLINE-{uuid.uuid4().hex[:8].upper()}"
         try:
             raw_items = item.get("items") or item.get("detalles") or []
             items_create = [
@@ -446,6 +460,11 @@ def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)
             ]
 
             metodo_id = int(item.get("metodo_pago_id") or 1)
+            m_str = str(item.get("metodo") or item.get("metodo_pago") or "").lower()
+            if "tarjeta" in m_str or "stripe" in m_str:
+                metodo_id = 4
+            elif "qr" in m_str:
+                metodo_id = 3
             if item.get("metodo"):
                 m_str = str(item.get("metodo")).lower()
                 if "tarjeta" in m_str:
@@ -471,18 +490,28 @@ def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)
                 s_first = db.query(Sucursal).first()
                 suc_final_id = s_first.id if s_first else 1
 
+            cliente_ref = (
+                item.get("cliente_id")
+                or item.get("cliente_ci")
+                or item.get("cliente_nombre")
+                or item.get("usuario_id")
+                or ""
+            )
+            es_ecom_off = bool(item.get("origen_offline") or item.get("direccion_envio") or item.get("payment_intent_id"))
+            tipo_v_id = 2 if es_ecom_off else int(item.get("tipo_venta_id") or 1)
+
             v = _ejecutar_venta_pos_core(
                 db=db,
                 sucursal_id=suc_final_id,
                 metodo_pago_id=metodo_id,
                 items=items_create,
-                empleado_ci=str(item.get("empleado_id") or item.get("usuario_id") or "1001"),
-                cliente_ci=str(item.get("cliente_ci") or item.get("cliente_nombre") or "") or None,
+                empleado_ci=str(item.get("empleado_id") or "1001"),
+                cliente_ci=str(cliente_ref).strip() if cliente_ref else None,
                 nit_cliente=str(item.get("nit_cliente") or "0"),
                 razon_social=str(item.get("razon_social") or item.get("cliente_nombre") or "Sin Nombre"),
                 monto_recibido=float(item.get("monto_recibido")) if item.get("monto_recibido") is not None else None,
                 descuento_total=float(item.get("descuento_total") or 0.0),
-                tipo_venta_id=1,
+                tipo_venta_id=tipo_v_id,
                 codigo_transaccion_custom=u_id
             )
             db.commit()
@@ -522,6 +551,8 @@ def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)
     summary="Procesar venta digital en E-commerce Web / Móvil"
 )
 @router.post("/ecommerce/", response_model=VentaResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
+@router.post("/checkout", response_model=VentaResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
+@router.post("/checkout/", response_model=VentaResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depends(get_db)):
     cliente = _resolver_o_crear_cliente(db=db, cliente_input=venta_in.cliente_id, razon_social=venta_in.razon_social)
 
@@ -602,7 +633,8 @@ def procesar_venta_ecommerce(venta_in: VentaEcommerceCreate, db: Session = Depen
         razon_social=venta_in.razon_social or f"{cliente.nombre} {cliente.apellido_pat}",
         monto_recibido=None,
         descuento_total=0.0,
-        tipo_venta_id=tipo_venta_id
+        tipo_venta_id=tipo_venta_id,
+        codigo_transaccion_custom=venta_in.uuid_transaccion
     )
 
     # Vaciar carrito de base de datos si existía
@@ -662,23 +694,25 @@ def listar_mis_ventas(
         joinedload(Venta.detalles).joinedload(DetalleVenta.variante).joinedload(VariantePrenda.color)
     )
 
-    if cliente_ci and str(cliente_ci).strip() not in ["null", "undefined", "0", ""]:
-        ci_target = str(cliente_ci).strip()
-        ci_targets = [ci_target]
-        u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_target)).first()
-        if not u and "@" in ci_target:
-            p = db.query(Persona).filter(Persona.correo.ilike(ci_target)).first()
-            if p:
-                ci_targets.append(p.ci)
-                u = db.query(Usuario).filter(Usuario.persona_ci == p.ci).first()
-        if u and u.persona_ci:
-            ci_targets.append(u.persona_ci)
-        if ci_target.isdigit():
-            u_id = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
-            if u_id and u_id.persona_ci:
-                ci_targets.append(u_id.persona_ci)
+    if not cliente_ci or str(cliente_ci).strip() in ["null", "undefined", "0", ""]:
+        return []
 
-        query = query.filter(Venta.cliente_id.in_(ci_targets))
+    ci_target = str(cliente_ci).strip()
+    ci_targets = [ci_target]
+    u = db.query(Usuario).filter(Usuario.nombre_usuario.ilike(ci_target)).first()
+    if not u and "@" in ci_target:
+        p = db.query(Persona).filter(Persona.correo.ilike(ci_target)).first()
+        if p:
+            ci_targets.append(p.ci)
+            u = db.query(Usuario).filter(Usuario.persona_ci == p.ci).first()
+    if u and u.persona_ci:
+        ci_targets.append(u.persona_ci)
+    if ci_target.isdigit():
+        u_id = db.query(Usuario).filter(Usuario.id == int(ci_target)).first()
+        if u_id and u_id.persona_ci:
+            ci_targets.append(u_id.persona_ci)
+
+    query = query.filter(Venta.cliente_id.in_(ci_targets))
 
     ventas = query.order_by(Venta.id.desc()).all()
     return [_formatear_venta(v) for v in ventas]
@@ -1110,6 +1144,9 @@ def obtener_venta_frontend(venta_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.patch("/{venta_id}/estado")
+@router.patch("/{venta_id}")
+@router.put("/{venta_id}/estado")
 @compat_router.patch("/{venta_id}/")
 @compat_router.patch("/{venta_id}")
 def actualizar_estado_venta_compat(venta_id: int, payload: dict, db: Session = Depends(get_db)):
@@ -1119,15 +1156,21 @@ def actualizar_estado_venta_compat(venta_id: int, payload: dict, db: Session = D
     
     nuevo_estado = payload.get("estado", "")
     if nuevo_estado:
-        est_str = nuevo_estado.lower()
-        if "completad" in est_str or "pagad" in est_str:
+        est_str = str(nuevo_estado).upper()
+        if "ENTREGAD" in est_str:
+            venta.estado_pago = "ENTREGADO"
+        elif "LISTO" in est_str or "RUTA" in est_str:
+            venta.estado_pago = "LISTO_RETIRO"
+        elif "PREPARAC" in est_str:
+            venta.estado_pago = "EN_PREPARACION"
+        elif "COMPLETAD" in est_str or "PAGAD" in est_str:
             venta.estado_pago = "COMPLETADA"
-        elif "cancelad" in est_str or "anulad" in est_str:
+        elif "CANCELAD" in est_str or "ANULAD" in est_str:
             venta.estado_pago = "ANULADA"
-        elif "fallid" in est_str or "rechazad" in est_str:
+        elif "FALLID" in est_str or "RECHAZAD" in est_str:
             venta.estado_pago = "FALLIDA"
         else:
-            venta.estado_pago = "PENDIENTE"
+            venta.estado_pago = est_str
     
     db.commit()
     return {"message": "Venta actualizada exitosamente", "id": venta.id, "estado": venta.estado_pago}

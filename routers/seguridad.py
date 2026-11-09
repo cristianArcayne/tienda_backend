@@ -36,11 +36,43 @@ def hash_password(password: str) -> str:
 @router.post("/api/v1/registrar_cliente/", response_model=ClienteRegistroResponse, status_code=status.HTTP_201_CREATED)
 def registrar_cliente(req: ClienteRegistroRequest, db: Session = Depends(get_db)):
     from sqlalchemy import func
-    # 1. Verificar si el username o correo ya existen
-    if db.query(Usuario).filter(func.lower(Usuario.nombre_usuario) == req.username.strip().lower()).first():
+    # 1. Verificar si el username ya está en uso por otro usuario
+    u_con_mismo_nombre = db.query(Usuario).filter(func.lower(Usuario.nombre_usuario) == req.username.strip().lower()).first()
+    if u_con_mismo_nombre:
         raise HTTPException(status_code=400, detail="El nombre de usuario ya está en uso. Por favor elige otro.")
-    if req.email and db.query(Persona).filter(func.lower(Persona.correo) == req.email.strip().lower()).first():
-        raise HTTPException(status_code=400, detail="El correo electrónico ya está registrado. Inicia sesión o recupera tu contraseña.")
+
+    persona_existente = None
+    if req.email and req.email.strip():
+        persona_existente = db.query(Persona).filter(func.lower(Persona.correo) == req.email.strip().lower()).first()
+    if not persona_existente and req.ci and str(req.ci).strip() not in ["0", ""]:
+        persona_existente = db.query(Persona).filter(Persona.ci == str(req.ci).strip()).first()
+
+    if persona_existente:
+        # Verificar si la persona ya tiene un usuario vinculado
+        u_vinculado = db.query(Usuario).filter(Usuario.persona_ci == persona_existente.ci).first()
+        if u_vinculado:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ya existe una cuenta con este correo/CI (usuario: {u_vinculado.nombre_usuario}). Inicia sesión con tus credenciales."
+            )
+        nuevo_cliente = persona_existente
+    else:
+        ci_final = str(req.ci).strip() if (req.ci and str(req.ci).strip() not in ["0", ""]) else str(uuid.uuid4().int)[:8]
+        while db.query(Persona).filter(Persona.ci == ci_final).first():
+            ci_final = str(uuid.uuid4().int)[:8]
+
+        nuevo_cliente = Cliente(
+            ci=ci_final,
+            nombre=req.nombre.strip(),
+            apellido_pat=req.apellido.strip(),
+            apellido_mat="",
+            correo=req.email.strip() if req.email else f"{req.username.strip()}@sin-correo.com",
+            telefono=req.telefono.strip() if req.telefono else None,
+            preferencia_talla="M"
+        )
+        db.add(nuevo_cliente)
+        db.commit()
+        db.refresh(nuevo_cliente)
 
     # 2. Buscar o crear el rol CLIENTE
     rol_cliente = db.query(Rol).filter(func.lower(Rol.nombre) == "cliente").first()
@@ -50,21 +82,7 @@ def registrar_cliente(req: ClienteRegistroRequest, db: Session = Depends(get_db)
         db.commit()
         db.refresh(rol_cliente)
 
-    # 3. Crear el Cliente (Hereda de Persona)
-    fake_ci = str(uuid.uuid4().int)[:8]
-    nuevo_cliente = Cliente(
-        ci=fake_ci,
-        nombre=req.nombre,
-        apellido_pat=req.apellido,
-        apellido_mat="",
-        correo=req.email.strip() if req.email else f"{req.username.strip()}@sin-correo.com",
-        preferencia_talla="M"
-    )
-    db.add(nuevo_cliente)
-    db.commit()
-    db.refresh(nuevo_cliente)
-
-    # 4. Crear el Usuario asociado
+    # 3. Crear el Usuario asociado
     nuevo_usuario = Usuario(
         nombre_usuario=req.username.strip(),
         contrasena=hash_password(req.password),

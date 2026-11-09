@@ -7,6 +7,8 @@ class ClienteRegistroRequest(BaseModel):
     password: str
     nombre: str
     apellido: str
+    ci: Optional[str] = None
+    telefono: Optional[str] = None
     fecha_nacimiento: Optional[Union[date, str]] = None
     email: Optional[str] = None
 
@@ -50,14 +52,15 @@ class EnviarCodigoRequest(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
 
+class EnviarCodigoResponse(BaseModel):
+    success: bool
+    mensaje: str
+
 class VerificarCodigoRequest(BaseModel):
     username_or_email: Optional[str] = None
-    username: Optional[str] = None
     codigo: str
 
 class CambiarContrasenaRequest(BaseModel):
     username_or_email: Optional[str] = None
-    username: Optional[str] = None
     codigo: str
-    nueva_contrasena: Optional[str] = None
-    nueva_password: Optional[str] = None
+    nueva_password: str
