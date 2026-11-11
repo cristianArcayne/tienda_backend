@@ -822,44 +822,48 @@ def eliminar_producto_compat(ropa_id: int, db: Session = Depends(get_db)):
 @router_productos_compat.get("/{ropa_id}/recomendados")
 @router_productos_compat.get("/{ropa_id}/recomendados/")
 def recomendados_compat(ropa_id: int, request: Request, db: Session = Depends(get_db)):
-    from models.seguridad_persona import Usuario, Favorito
-    from models.ventas_envios import Venta, DetalleVenta
-    
-    recomendados_set = set()
-    
-    user_id = request.headers.get("x-user-id")
-    usuario_id_bd = None
-    
-    if user_id and user_id.isdigit():
-        usuario_id_bd = int(user_id)
+    try:
+        from models.seguridad_persona import Usuario
+        from models.catalogo import Favorito, VariantePrenda
+        from models.venta import Venta, DetalleVenta
         
-    if usuario_id_bd:
-        favs = db.query(Favorito.ropa_id).filter(Favorito.usuario_id == usuario_id_bd).all()
-        for f in favs:
-            if f[0] != ropa_id:
-                recomendados_set.add(f[0])
-                
-        compras = db.query(DetalleVenta.ropa_id).join(Venta).filter(Venta.cliente_id == usuario_id_bd).all()
-        for c in compras:
-            if c[0] != ropa_id:
-                recomendados_set.add(c[0])
-                
-    ropa_rec = []
-    if recomendados_set:
-        ropa_rec = db.query(Ropa).filter(Ropa.id.in_(recomendados_set)).limit(4).all()
+        recomendados_set = set()
+        user_id = request.headers.get("x-user-id")
+        usuario_id_bd = None
         
-    faltantes = 4 - len(ropa_rec)
-    if faltantes > 0:
-        ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
-        if ropa:
-            excluir_ids = [r.id for r in ropa_rec] + [ropa_id]
-            q = db.query(Ropa).filter(Ropa.id.notin_(excluir_ids))
-            if ropa.categoria_id:
-                q = q.filter(Ropa.categoria_id == ropa.categoria_id)
-            comp = q.limit(faltantes).all()
-            ropa_rec.extend(comp)
+        if user_id and user_id.isdigit():
+            usuario_id_bd = int(user_id)
             
-    return [_formatear_producto_angular(r, db=db) for r in ropa_rec]
+        if usuario_id_bd:
+            favs = db.query(Favorito.ropa_id).filter(Favorito.usuario_id == usuario_id_bd).all()
+            for f in favs:
+                if f[0] != ropa_id:
+                    recomendados_set.add(f[0])
+                    
+            compras = db.query(VariantePrenda.ropa_id).join(DetalleVenta, DetalleVenta.variante_id == VariantePrenda.id).join(Venta, DetalleVenta.venta_id == Venta.id).filter(Venta.cliente_id == str(usuario_id_bd)).all()
+            for c in compras:
+                if c[0] != ropa_id:
+                    recomendados_set.add(c[0])
+                    
+        ropa_rec = []
+        if recomendados_set:
+            ropa_rec = db.query(Ropa).filter(Ropa.id.in_(recomendados_set)).limit(4).all()
+            
+        faltantes = 4 - len(ropa_rec)
+        if faltantes > 0:
+            ropa = db.query(Ropa).filter(Ropa.id == ropa_id).first()
+            if ropa:
+                excluir_ids = [r.id for r in ropa_rec] + [ropa_id]
+                q = db.query(Ropa).filter(Ropa.id.notin_(excluir_ids))
+                if ropa.categoria_id:
+                    q = q.filter(Ropa.categoria_id == ropa.categoria_id)
+                comp = q.limit(faltantes).all()
+                ropa_rec.extend(comp)
+                
+        return [_formatear_producto_angular(r, db=db) for r in ropa_rec]
+    except Exception:
+        otros = db.query(Ropa).filter(Ropa.id != ropa_id).limit(4).all()
+        return [_formatear_producto_angular(r, db=db) for r in otros]
 
 
 # ─── Endpoint para Detalle de Producto (/api/productos-detalle) ─────────────

@@ -456,6 +456,152 @@ def chat_personal_shopper(chat_req: ChatMessageRequest, db: Session = Depends(ge
             motivo_sugerencia=motivo
         )
 
+    # =========================================================================
+    # MOTOR PRINCIPAL: AGENTE GENERATIVO CON RAG (GOOGLE GEMINI API)
+    # =========================================================================
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key and prendas_stock:
+        try:
+            import requests
+            from models.catalogo import Promocion
+
+            sucs = db.query(Sucursal).all()
+            promos = db.query(Promocion).filter(
+                Promocion.fecha_inicio <= date.today(),
+                Promocion.fecha_fin >= date.today()
+            ).all()
+
+            # Formateo de Grounding / RAG Context
+            nombre_cliente = f"{persona_obj.nombre} {persona_obj.apellido_pat}".strip() if (persona_obj and hasattr(persona_obj, 'nombre')) else (usuario_obj.nombre_usuario if usuario_obj else "estimado/a cliente")
+            compras_txt = ", ".join([f"{p.nombre} (Bs. {float(p.precio):.2f})" for p in prendas_compradas[:5]]) if prendas_compradas else "Sin compras previas registradas"
+            favs_txt = ", ".join([p.nombre for p in prendas_favoritas[:5]]) if prendas_favoritas else "Sin favoritos registrados"
+            sucs_txt = "; ".join([f"{s.nombre} ({s.direccion or 'Santa Cruz'} - Tel: {s.telefono or '3-334455'})" for s in sucs])
+            promos_txt = "; ".join([f"{pr.nombre} ({pr.porcentaje_descuento}% de descuento hasta {pr.fecha_fin.strftime('%d/%m/%Y')})" for pr in promos]) if promos else "Descuento combo especial del 10% en outfits completos"
+
+            catalog_lines = []
+            for p in prendas_stock[:15]:
+                cat_n = p.categoria.nombre if p.categoria else "Moda"
+                catalog_lines.append(f"- ID {p.id}: {p.nombre} | Categoria: {cat_n} | Precio: Bs. {float(p.precio):.2f}")
+            catalog_context = "\n".join(catalog_lines)
+
+            prompt_gemini = f"""
+Eres Lucy, la Personal Shopper y Asesora de Imagen exclusiva de FashionStore en Santa Cruz de la Sierra, Bolivia.
+Eres elegante, empatica, concisa y experta en estilismo, colorimetria, ocasiones de uso y el clima calido/tropical de Santa Cruz.
+Tu objetivo es dar una atencion de primer nivel, orientando al cliente a combinaciones favorecedoras de nuestro catalogo real.
+
+INVENTARIO EN STOCK REAL DISPONIBLE HOY (REGLA CRITICA ESTRICTA: Recomienda UNICAMENTE prendas de esta lista, jamas inventes prendas o marcas que no figuren aqui):
+{catalog_context}
+
+CONTEXTO DEL CLIENTE:
+- Nombre del cliente: {nombre_cliente}
+- Compras previas del cliente: {compras_txt}
+- Favoritos del cliente: {favs_txt}
+- Sucursales fisicas en Santa Cruz: {sucs_txt}
+- Promociones y descuentos vigentes: {promos_txt}
+- Moneda oficial: Bolivianos (Bs.)
+
+MENSAJE DEL CLIENTE:
+"{chat_req.mensaje}"
+
+INSTRUCCIONES DE SALIDA:
+1. Responde de forma calida, profesional y concisa (1 o maximo 2 parrafos). Usa Markdown con negritas en nombres de prendas y sucursales.
+2. Si el cliente pide outfit, asesoria, recomendaciones o que ponerse, selecciona entre 1 y 3 IDs de prendas de la lista de inventario que armen una combinacion armonica.
+3. Si el cliente pregunta sobre stock, tiendas fisicas, precios o promociones, respondele claramente con los datos del contexto.
+4. Genera la respuesta estrictamente en formato JSON valido con la siguiente estructura:
+{{
+  "mensaje": "Texto de la respuesta de Lucy al cliente...",
+  "prendas_ids": [id1, id2],
+  "motivo_estilismo": "Breve explicacion estetica o de combinacion",
+  "outfit_nombre": "Nombre atractivo del look si armaste una combinacion (o null)",
+  "ocasion": "Casual / Formal / Fiesta / Deportivo / Trabajo"
+}}
+"""
+
+            data_resp = None
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt_gemini}]}],
+                "generationConfig": {
+                    "response_mime_type": "application/json",
+                    "temperature": 0.3,
+                    "maxOutputTokens": 450
+                }
+            }
+            try:
+                r = requests.post(url, json=payload, timeout=10)
+                if r.status_code == 200:
+                    data_resp = r.json()
+            except Exception:
+                pass
+
+            if data_resp and "candidates" in data_resp and data_resp["candidates"]:
+                part_text = data_resp["candidates"][0]["content"]["parts"][0]["text"].strip()
+                parsed = json.loads(part_text)
+                texto_gemini = parsed.get("mensaje", "").strip()
+
+                if texto_gemini:
+                    ids_sugeridos = parsed.get("prendas_ids", []) or []
+                    prendas_stock_map = {p.id: p for p in prendas_stock}
+                    sug_gemini = []
+
+                    for pid in ids_sugeridos:
+                        if isinstance(pid, int) and pid in prendas_stock_map:
+                            sug_gemini.append(_crear_prenda_item(prendas_stock_map[pid], parsed.get("motivo_estilismo") or "Recomendada por tu Personal Shopper"))
+
+                    if len(sug_gemini) < 2:
+                        for p in prendas_stock:
+                            if p.nombre.lower() in texto_gemini.lower() and p.id not in [x.ropa_id for x in sug_gemini]:
+                                sug_gemini.append(_crear_prenda_item(p, "Recomendada por tu Personal Shopper"))
+
+                    outfit_resp = None
+                    if len(sug_gemini) >= 2:
+                        base_it = sug_gemini[0]
+                        comps = sug_gemini[1:]
+                        tot = sum(it.precio for it in sug_gemini)
+                        desc = round(tot * 0.10, 2)
+                        outfit_nom = parsed.get("outfit_nombre") or f"Outfit {parsed.get('ocasion', 'Exclusivo')} Lucy"
+                        motivo = parsed.get("motivo_estilismo") or "Combinacion armonica seleccionada con IA generativa."
+                        ocasion_val = parsed.get("ocasion") or "Casual"
+
+                        outfit_resp = OutfitRecomendadoResponse(
+                            id=1,
+                            outfit_nombre=outfit_nom,
+                            descripcion_estilo=motivo,
+                            ocasion=ocasion_val,
+                            score_afinidad=98.0,
+                            tipo_algoritmo="GEMINI_RAG_PERSONAL_SHOPPER",
+                            prenda_principal=base_it,
+                            prendas_complementarias=comps,
+                            precio_total_outfit=round(tot, 2),
+                            descuento_combo_aplicable=desc,
+                            precio_final_con_descuento=round(tot - desc, 2)
+                        )
+
+                        try:
+                            cliente_ci_val = cliente_obj.ci if cliente_obj else (ci_targets[0] if ci_targets else None)
+                            if cliente_ci_val:
+                                rec_log = RecomendacionIA(
+                                    cliente_id=cliente_ci_val,
+                                    ropa_principal_id=base_it.ropa_id,
+                                    outfit_nombre=outfit_nom,
+                                    prendas_sugeridas_ids=",".join([str(x.ropa_id) for x in sug_gemini]),
+                                    tipo_algoritmo="GEMINI_RAG_PERSONAL_SHOPPER",
+                                    score_afinidad=98.00,
+                                    aceptada=False
+                                )
+                                db.add(rec_log)
+                                db.commit()
+                        except Exception:
+                            db.rollback()
+
+                    return ChatMessageResponse(
+                        respuesta_texto=texto_gemini,
+                        outfit_recomendado=outfit_resp,
+                        prendas_sugeridas=sug_gemini[:4]
+                    )
+        except Exception:
+            pass
+
     # 1. INTENCIÓN: SUCURSALES / TIENDAS FÍSICAS (¿Cuántas hay, dónde quedan, direcciones?)
     if any(k in msj for k in ["sucursal", "sucursales", "tienda", "tiendas", "donde queda", "dónde queda", "donde estan", "dónde están", "direccion", "dirección", "ubicacion", "ubicación", "calacoto", "equipetrol", "ventura"]):
         sucs = db.query(Sucursal).all()

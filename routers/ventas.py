@@ -270,8 +270,11 @@ def _ejecutar_venta_pos_core(
             db.flush()
 
         if inv.stock_disponible < item.cantidad:
-            inv.stock_fisico = (inv.stock_reservado or 0) + item.cantidad + 50
-            db.flush()
+            nombre_prenda = var.ropa.nombre if (var and var.ropa) else f"Variante #{item.variante_id}"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflicto de stock offline: Existencias agotadas para '{nombre_prenda}'. Stock disponible: {inv.stock_disponible}, solicitado: {item.cantidad}."
+            )
 
         disponible = inv.stock_disponible
 
@@ -525,10 +528,12 @@ def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)
             })
         except Exception as e:
             db.rollback()
+            detalle_err = e.detail if hasattr(e, "detail") else str(e)
+            is_conflict = (hasattr(e, "status_code") and e.status_code == 409) or "conflicto" in str(detalle_err).lower() or "stock" in str(detalle_err).lower()
             resultados.append({
                 "offline_uuid": u_id,
-                "status": "ERROR",
-                "detalle": str(e)
+                "status": "CONFLICTO_STOCK" if is_conflict else "ERROR",
+                "detalle": detalle_err
             })
 
     return {
