@@ -533,12 +533,15 @@ def sincronizar_lote_ventas_offline(payload: dict, db: Session = Depends(get_db)
             resultados.append({
                 "offline_uuid": u_id,
                 "status": "CONFLICTO_STOCK" if is_conflict else "ERROR",
-                "detalle": detalle_err
+                "motivo": "SOBREVENTA_STOCK_AGOTADO" if is_conflict else "ERROR_VALIDACION",
+                "detalle": detalle_err,
+                "estrategia_resolucion": "REVERSION_FINANCIERA_Y_NOTIFICACION" if is_conflict else None
             })
 
     return {
         "total_recibidas": len(ventas_raw),
         "total_exitosas": sum(1 for r in resultados if r["status"] == "SINCRONIZADA"),
+        "total_conflictos": sum(1 for r in resultados if r["status"] in ["CONFLICTO_STOCK", "EN_CONFLICTO"]),
         "resultados": resultados
     }
 

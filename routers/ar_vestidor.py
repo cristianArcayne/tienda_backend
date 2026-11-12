@@ -5,7 +5,10 @@ Incluye Virtual Try-On con IA mediante Fashn.ai.
 """
 import os
 import base64
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
 import asyncio
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form

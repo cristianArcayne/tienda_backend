@@ -12,3 +12,6 @@ reportlab
 aiohttp
 email-validator
 stripe>=11.0.0
+httpx
+requests
+qrcode
